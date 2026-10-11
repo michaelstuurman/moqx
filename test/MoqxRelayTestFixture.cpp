@@ -128,15 +128,14 @@ void MoQRelayTest::TearDown() {
   drainExecs();
 }
 
-std::shared_ptr<MockMoQSession> MoQRelayTest::createMockSession() {
-  return createMockSessionOn(exec_);
+std::shared_ptr<MockMoQSession> MoQRelayTest::createMockSession(uint64_t version) {
+  return createMockSessionOn(exec_, version);
 }
 
 std::shared_ptr<MockMoQSession>
-MoQRelayTest::createMockSessionOn(std::shared_ptr<moxygen::MoQExecutor> exec) {
+MoQRelayTest::createMockSessionOn(std::shared_ptr<moxygen::MoQExecutor> exec, uint64_t version) {
   auto session = std::make_shared<NiceMock<MockMoQSession>>(std::move(exec));
-  ON_CALL(*session, getNegotiatedVersion())
-      .WillByDefault(Return(std::optional<uint64_t>(kVersionDraft16)));
+  ON_CALL(*session, getNegotiatedVersion()).WillByDefault(Return(std::optional<uint64_t>(version)));
   ON_CALL(*session, getRelayLinkCost()).WillByDefault(Return(uint64_t{1}));
   ON_CALL(*session, negotiatedSetupExtension(SetupExtension::RelayHops))
       .WillByDefault(Return(false));

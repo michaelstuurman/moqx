@@ -49,6 +49,7 @@ public:
   struct Ready {
     std::shared_ptr<moxygen::MoQForwarder> forwarder;
     std::optional<moxygen::SessionId> sourceSessionId;
+    std::weak_ptr<void> sourceIdentity;
   };
   using State = std::variant<Absent, Pending, Ready>;
 
@@ -84,6 +85,14 @@ public:
       auto it = registry_->forwarders_.find(ftn_);
       if (it != registry_->forwarders_.end() && it->second.forwarder == forwarder_) {
         it->second.sourceSessionId = id;
+      }
+    }
+
+    void setSourceIdentity(std::weak_ptr<void> source) {
+      XCHECK(registry_) << "setSourceIdentity() on a resolved or empty Claim";
+      auto it = registry_->forwarders_.find(ftn_);
+      if (it != registry_->forwarders_.end() && it->second.forwarder == forwarder_) {
+        it->second.sourceIdentity = std::move(source);
       }
     }
 
@@ -203,7 +212,7 @@ public:
       if (it->second.ready) {
         return Pending{it->second.ready->getSemiFuture()};
       }
-      return Ready{it->second.forwarder, it->second.sourceSessionId};
+      return Ready{it->second.forwarder, it->second.sourceSessionId, it->second.sourceIdentity};
     }
     auto forwarder = factory();
     XCHECK(forwarder) << "join() factory returned null for " << ftn;
@@ -308,13 +317,14 @@ private:
     // Non-null iff the entry is pending; it is the state discriminator.
     Promise ready;
     std::optional<moxygen::SessionId> sourceSessionId;
+    std::weak_ptr<void> sourceIdentity;
   };
 
   static State stateOf(const Entry& entry) {
     if (entry.ready) {
       return Pending{entry.ready->getSemiFuture()};
     }
-    return Ready{entry.forwarder, entry.sourceSessionId};
+    return Ready{entry.forwarder, entry.sourceSessionId, entry.sourceIdentity};
   }
 
   ParkResult replaceImpl(
@@ -342,6 +352,8 @@ private:
     // Outlive the entry update: dropping the last ref here would run ~MoQForwarder,
     // which reenters the registry through its callback, against a half-written entry.
     auto displaced = std::exchange(entry.forwarder, forwarder);
+    entry.sourceSessionId.reset();
+    entry.sourceIdentity = forwarder;
     const void* parked = nullptr;
     if (displaced && park == Park::Yes) {
       parked = displaced.get();

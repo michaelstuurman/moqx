@@ -12,7 +12,10 @@ namespace openmoq::moqx::test {
 
 class RecordingNamespacePublishHandle : public Publisher::NamespacePublishHandle {
 public:
-  void namespaceMsg(const Namespace& ns) override { namespaces.push_back(ns); }
+  void namespaceMsg(const Namespace& ns) override {
+    namespaces.push_back(ns);
+    withdrawals.push_back(false);
+  }
 
   void namespaceMsg(const TrackNamespace& suffix) override {
     Namespace ns;
@@ -20,10 +23,14 @@ public:
     namespaces.push_back(std::move(ns));
   }
 
-  void namespaceDoneMsg(const TrackNamespace& suffix) override { dones.push_back(suffix); }
+  void namespaceDoneMsg(const TrackNamespace& suffix) override {
+    dones.push_back(suffix);
+    withdrawals.push_back(true);
+  }
 
   std::vector<Namespace> namespaces;
   std::vector<TrackNamespace> dones;
+  std::vector<bool> withdrawals;
 };
 
 TEST_P(MoQRelayTest, AnonymousPublisherUsesZeroOriginAndAppendsRelayHop) {
@@ -351,6 +358,57 @@ TEST_P(MoQRelayTest, ExcludedSubscriberGetsNoNamespaceDone) {
   driveIfMultiThread();
 }
 
+TEST_P(MoQRelayTest, ClusterOriginReplacementWithdrawsBeforeReadvertising) {
+  resetRelay(config::CacheConfig{.maxCachedTracks = 0}, "", 900);
+  auto sourceA = createMockSession(kVersionDraft18);
+  auto sourceB = createMockSession(kVersionDraft18);
+  auto observer = createMockSession(kVersionDraft18);
+  for (auto session : {sourceA, sourceB, observer}) {
+    ON_CALL(*session, negotiatedSetupExtension(SetupExtension::RelayHops))
+        .WillByDefault(Return(true));
+  }
+  auto advertisements = std::make_shared<RecordingNamespacePublishHandle>();
+  auto subscription = doSubscribeNamespace(observer, kTestNamespace, true, advertisements);
+  std::vector<std::shared_ptr<Subscriber::PublishNamespaceHandle>> publications;
+  for (auto [source, origin] : {std::pair{sourceA, uint64_t{7}}, std::pair{sourceB, uint64_t{8}}}) {
+    PublishNamespace pub;
+    pub.trackNamespace = kTestNamespace;
+    pub.params.insertParam(Parameter(
+        folly::to_underlying(TrackRequestParamKey::HOP_PATH),
+        encodeRelayHopPath({origin}, kVersionDraft18).value()
+    ));
+    auto result = withSessionContext(source, [&] {
+      return folly::coro::blockingWait(
+          subscriberInterface()->publishNamespace(std::move(pub), nullptr),
+          exec_.get()
+      );
+    });
+    ASSERT_TRUE(result.hasValue());
+    publications.push_back(*result);
+  }
+  driveIfMultiThread();
+  EXPECT_EQ(advertisements->withdrawals, (std::vector<bool>{false, true, false}));
+  ASSERT_EQ(advertisements->namespaces.size(), 2);
+  EXPECT_EQ(
+      decodeRelayHopPath(
+          advertisements->namespaces.back()
+              .params.getFirstParam(TrackRequestParamKey::HOP_PATH)
+              ->asString,
+          kVersionDraft18
+      )
+          .value(),
+      (std::vector<uint64_t>{8, 900})
+  );
+  for (auto& publication : publications) {
+    publication->publishNamespaceDone();
+  }
+  for (auto session : {sourceA, sourceB, observer}) {
+    removeSession(session);
+  }
+  subscription.reset();
+  driveIfMultiThread();
+}
+
 TEST_P(MoQRelayTest, ClusterUpdatesSelectStandbyPerPeerAndPreserveStream) {
   resetRelay(config::CacheConfig{.maxCachedTracks = 0}, "", 900);
   auto sourceA = createMockSession();
@@ -388,7 +446,7 @@ TEST_P(MoQRelayTest, ClusterUpdatesSelectStandbyPerPeerAndPreserveStream) {
   };
   auto first = publish(sourceA, {7, 10}, 1);
   ASSERT_TRUE(first.hasValue());
-  auto second = publish(sourceB, {8, 11}, 5);
+  auto second = publish(sourceB, {7, 11}, 5);
   ASSERT_TRUE(second.hasValue());
   driveIfMultiThread();
   ASSERT_EQ(allAds->namespaces.size(), 1);
@@ -415,17 +473,17 @@ TEST_P(MoQRelayTest, ClusterUpdatesSelectStandbyPerPeerAndPreserveStream) {
   );
   driveIfMultiThread();
   ASSERT_EQ(allAds->namespaces.size(), 2);
-  EXPECT_EQ(pathOf(allAds->namespaces.back()), (std::vector<uint64_t>{8, 11, 900}));
-  EXPECT_EQ(allAds->dones.size(), 1);
+  EXPECT_EQ(pathOf(allAds->namespaces.back()), (std::vector<uint64_t>{7, 11, 900}));
+  EXPECT_TRUE(allAds->dones.empty());
   second.value()->publishNamespaceDone();
   driveIfMultiThread();
   ASSERT_EQ(allAds->namespaces.size(), 3);
   EXPECT_EQ(pathOf(allAds->namespaces.back()), (std::vector<uint64_t>{7, 10, 900}));
-  EXPECT_EQ(allAds->dones.size(), 2);
+  EXPECT_TRUE(allAds->dones.empty());
   EXPECT_EQ(filteredAds->dones.size(), 1);
   first.value()->publishNamespaceDone();
   driveIfMultiThread();
-  EXPECT_EQ(allAds->dones.size(), 3);
+  EXPECT_EQ(allAds->dones.size(), 1);
   for (auto session : {sourceA, sourceB, observer, excluded}) {
     removeSession(session);
   }
