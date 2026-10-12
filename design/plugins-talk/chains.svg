@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" font-family="Source Sans Pro, Helvetica, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <marker id="f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#adb5bd"/>
+    </marker>
+    <style>
+      .node { fill: #f1f3f5; stroke: #868e96; stroke-width: 2; }
+      .hook { fill: #ffe8cc; stroke: #e8590c; stroke-width: 2.5; }
+      .off { fill: #f8f9fa; stroke: #ced4da; stroke-width: 2; stroke-dasharray: 6 5; }
+      .leg { fill: #fff; stroke: #ced4da; stroke-width: 1.5; }
+      .t { font-size: 24px; fill: #212529; text-anchor: middle; }
+      .to { font-size: 24px; fill: #adb5bd; text-anchor: middle; }
+      .s { font-size: 17px; fill: #495057; text-anchor: middle; }
+      .l { font-size: 18px; fill: #495057; }
+      .lo { font-size: 18px; fill: #adb5bd; }
+      .lt { font-size: 19px; fill: #212529; font-weight: bold; }
+      .e { stroke: #444; stroke-width: 2; fill: none; marker-end: url(#a); }
+      .ret { stroke: #444; stroke-width: 2; stroke-dasharray: 6 5; fill: none; marker-end: url(#a); }
+      .eo { stroke: #adb5bd; stroke-width: 2; stroke-dasharray: 6 5; fill: none; marker-end: url(#f); }
+    </style>
+  </defs>
+
+  <rect class="node" x="400" y="30" width="260" height="70" rx="8"/>
+  <text class="t" x="530" y="62">host</text>
+  <text class="s" x="530" y="87">co_await each in turn</text>
+
+  <rect class="hook" x="140" y="250" width="180" height="70" rx="8"/>
+  <text class="t" x="230" y="293">plugin A</text>
+  <rect class="hook" x="420" y="250" width="180" height="70" rx="8"/>
+  <text class="t" x="510" y="293">plugin B</text>
+  <rect class="off" x="700" y="250" width="180" height="70" rx="8"/>
+  <text class="to" x="790" y="293">plugin C</text>
+
+  <path class="e" d="M440,100 L215,248"/>
+  <path class="ret" d="M250,248 L470,102"/>
+  <text class="l" x="300" y="170" text-anchor="end">pass</text>
+
+  <path class="e" d="M500,100 V248"/>
+  <path class="ret" d="M530,248 V102"/>
+  <text class="l" x="545" y="180">result</text>
+
+  <path class="eo" d="M620,100 L780,248"/>
+  <text class="lo" x="715" y="160">only after pass</text>
+
+  <rect class="leg" x="910" y="30" width="270" height="200" rx="8"/>
+  <text class="lt" x="930" y="65">B's result</text>
+  <text class="l" x="930" y="102">pass: host calls C</text>
+  <text class="l" x="930" y="137">short-circuit: relay continues</text>
+  <text class="l" x="930" y="172">handle: B responds</text>
+  <text class="l" x="930" y="207">reject: error to the peer</text>
+</svg>

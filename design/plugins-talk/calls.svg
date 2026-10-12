@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" font-family="Source Sans Pro, Helvetica, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <style>
+      .node { fill: #f1f3f5; stroke: #868e96; stroke-width: 2; }
+      .hook { fill: #ffe8cc; stroke: #e8590c; stroke-width: 2.5; }
+      .panel { fill: none; stroke: #ced4da; stroke-width: 1.5; stroke-dasharray: 6 6; }
+      .t { font-size: 24px; fill: #212529; text-anchor: middle; }
+      .s { font-size: 17px; fill: #495057; text-anchor: middle; }
+      .lbl { font-size: 22px; fill: #868e96; font-weight: bold; }
+      .l { font-size: 18px; fill: #495057; }
+      .e { stroke: #444; stroke-width: 2; fill: none; marker-end: url(#a); }
+      .ret { stroke: #444; stroke-width: 2; stroke-dasharray: 6 5; fill: none; marker-end: url(#a); }
+    </style>
+  </defs>
+
+  <!-- coroutines: host loops -->
+  <rect class="panel" x="10" y="10" width="570" height="460" rx="12"/>
+  <text class="lbl" x="28" y="42">Control plane: the host loops</text>
+
+  <rect class="node" x="205" y="80" width="180" height="64" rx="8"/>
+  <text class="t" x="295" y="108">host</text>
+  <text class="s" x="295" y="132">co_await each in turn</text>
+
+  <rect class="hook" x="40" y="280" width="150" height="64" rx="8"/>
+  <text class="t" x="115" y="320">plugin A</text>
+  <rect class="hook" x="220" y="280" width="150" height="64" rx="8"/>
+  <text class="t" x="295" y="320">plugin B</text>
+  <rect class="hook" x="400" y="280" width="150" height="64" rx="8"/>
+  <text class="t" x="475" y="320">plugin C</text>
+
+  <path class="e" d="M235,144 L110,278"/>
+  <path class="ret" d="M135,278 L255,146"/>
+  <path class="e" d="M285,144 L285,278"/>
+  <path class="ret" d="M305,278 L305,146"/>
+  <path class="e" d="M335,144 L455,278"/>
+  <path class="ret" d="M480,278 L360,146"/>
+  <text class="l" x="140" y="200" text-anchor="end">1</text>
+  <text class="l" x="295" y="215" text-anchor="middle" dx="-26">2</text>
+  <text class="l" x="450" y="200">3</text>
+
+  <text class="l" x="40" y="400">Each plugin returns to the host.</text>
+  <text class="l" x="40" y="430">Stack depth stays at one plugin.</text>
+
+  <!-- callbacks: each calls the next -->
+  <rect class="panel" x="620" y="10" width="570" height="460" rx="12"/>
+  <text class="lbl" x="638" y="42">Data plane: each calls the next</text>
+
+  <rect class="node" x="640" y="70" width="150" height="56" rx="8"/>
+  <text class="t" x="715" y="106">host</text>
+  <rect class="hook" x="730" y="160" width="150" height="56" rx="8"/>
+  <text class="t" x="805" y="196">filter A</text>
+  <rect class="hook" x="820" y="250" width="150" height="56" rx="8"/>
+  <text class="t" x="895" y="286">filter B</text>
+  <rect class="hook" x="910" y="340" width="150" height="56" rx="8"/>
+  <text class="t" x="985" y="376">filter C</text>
+  <rect class="node" x="1020" y="410" width="150" height="50" rx="8"/>
+  <text class="t" x="1095" y="443">consumer</text>
+
+  <path class="e" d="M700,126 V188 H728"/>
+  <path class="e" d="M790,216 V278 H818"/>
+  <path class="e" d="M880,306 V368 H908"/>
+  <path class="e" d="M970,396 V435 H1018"/>
+  <text class="l" x="660" y="172">next</text>
+  <text class="l" x="750" y="262">next</text>
+  <text class="l" x="840" y="352">next</text>
+
+  <text class="l" x="640" y="430">A forwarding filter calls the next.</text>
+  <text class="l" x="640" y="455">The stack grows with the chain.</text>
+</svg>

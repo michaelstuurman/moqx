@@ -11,6 +11,10 @@
 | 3 | A trusted WebAssembly module | Operators changing behavior without a restart |
 | 4 | An untrusted WebAssembly module | Tenants running their own code at the edge |
 
+> **Open question:** When do we need Level 2?
+
+> **Open question:** What logging facilities does Level 2 give plugins?
+
 ---
 
 ## Level 1
@@ -29,7 +33,7 @@
 3. Each factory creates a `Plugin` per config entry.
 4. Each `Plugin` creates a `ServicePlugin` per service it applies to.
 5. Each `ServicePlugin` creates its worker instances on every I/O worker.
-6. Each `ServicePlugin` starts, in config order.
+6. Each `ServicePlugin` runs its `start` hook, in config order.
 7. The service accepts sessions.
 
 ---
@@ -41,36 +45,113 @@
 - Data plane hooks run per object.
 - Filtering an object is a data plane hook.
 
----
-
-## Level 1: hooks
-
 ![Hook points](hooks.svg)
 
 ---
 
 ## Coroutines vs callbacks
 
-- The relay's control plane runs on coroutines.
-- The relay's data plane already avoids coroutines.
-  - A filter that needs to wait gets a callback.
+![Coroutines vs callbacks](calls.svg)
+
+- A filter that needs to wait completes its callback later.
+- The host then forwards the object on the owning I/O worker.
+
+---
+
+## Hooks: chains
+
+![Hook chain](chains.svg)
+
+- Each hook point runs its plugins in config order.
+- Filters have three outcomes: forward, short-circuit or drop.
+
+---
+
+## Lifecycle hooks
+
+![Lifecycle](lifecycle.svg)
+
+- A plugin that only answers hooks needs no start work.
+
+> **Open question:** For a plugin's own work: should the host offer spawned coroutines, plugin threads, or both? The answer shapes Level 2.
+
+---
+
+## Threads a plugin starts
+
+![Plugin threads](threads.svg)
 
 ---
 
 ## Filters: rules
 
-- A filter may observe, delay or drop objects.
-- A filter never modifies an object's content.
-- A filter may modify an object's properties.
+![Filter rules](filter-rules.svg)
 
 ---
 
-## Filters: configured vs attached
+## Filters: who puts them there
 
-- Configured filters are chosen once, when a subscribe, publish or fetch starts.
-- A request update keeps them.
-- Attached filters are added and removed at runtime.
-- The control plane attaches them, per request or per track.
+![Filter sources](filter-sources.svg)
+
+- The control plane can also remove what it attached.
+- Ingress filters work the same way.
+- A request update keeps the configured filters.
+
+> **Open question:** In what order do attached filters run, among themselves and against configured ones?
+
+---
+
+## Use case: auth
+
+```text
+CLIENT_SETUP + token     ──▶ admit
+SUBSCRIBE (+ token) ...  ──▶ authorize
+```
+
+- `admit` verifies the SETUP token and checks that it may connect.
+- It keeps the token's grants, plus the anonymous grants, as session state.
+- `authorize` checks each request against those grants, or against the request's own token.
+- A check that calls an auth server suspends.
+- The I/O worker serves other sessions meanwhile.
+- A rejection answers with an error and stops the chain.
+
+---
+
+## Use case: MoQT track filter (top N)
+
+```text
+publisher  ──▶ ingress filter ── value, activity ──▶ coordinator: ranking
+coordinator ── PUBLISH / PUBLISH_DONE ──▶ subscriber
+```
+
+- A configured ingress filter registers each published track with the coordinator.
+- It reports the ranking property and the track's activity, and forwards objects unchanged.
+- At the track's end, it removes the track from the ranking.
+- The plugin handles `SUBSCRIBE_TRACKS`, and records its prefix, property and N.
+- On a selection change, the coordinator publishes the track to the subscriber, or ends it.
+
+> **Open question:** What host API lets a plugin publish an existing track to one subscriber?
+
+---
+
+## Use case: relay hops
+
+```text
+relay-a ──▶ relay-b ──▶ relay-c ──▶ relay-a   (dropped)
+```
+
+- The Hop ID lives in the `Plugin` root, shared by every service.
+- `announce` handles an announcement whose path already holds this Hop ID by dropping it.
+- `outgoing` appends this Hop ID to every forwarded announcement.
+
+---
+
+## Use case: default upstream
+
+- Its routing hook sees each request with no local publisher.
+- It handles the request by forwarding it upstream.
+- It sits last in config order.
+- Earlier plugins can handle a request first.
 
 ---
 
@@ -82,58 +163,12 @@ plugin     ── SUBSCRIBE live/video ──────────▶ relay  
 plugin     ── PUBLISH   live/video/wm-<id> ──▶ relay   (new objects)
 ```
 
-- A local session is an in-process peer that publishes and subscribes.
-- Each subscriber subscribes to a track unique to it.
-- Authorize ties `wm-<id>` to that subscriber.
-- The plugin publishes the unique track, with synthesized objects.
-- The source track's objects stay untouched.
-
----
-
-## Use case: filter a track on demand
-
-- An operator asks to stop delivering one track, through an admin route.
-- The plugin attaches a dropping filter to every subscription of that track, live and new.
-- Detaching stops it from each subscription's next stream on.
-
----
-
-## Use case: relay hops
-
-```text
-relay-a ──▶ relay-b ──▶ relay-c ──▶ relay-a   (dropped)
-```
-
-- Over `RELAY_HOPS` links, an announcement carries the Hop IDs of the relays it crossed.
-- The plugin drops an announcement that already holds its own Hop ID.
-- The plugin appends its own Hop ID when forwarding.
-- Both are announcement policy hooks.
-
----
-
-## Use case: default upstream
-
-- A subscribe with no local publisher goes to the upstream relay.
-- Today the upstream is core config, not a plugin.
-- As a plugin, it needs a routing hook.
-- That hook does not exist yet.
-
----
-
-## Use case: watermark + default upstream
-
-```text
-subscriber ── SUBSCRIBE live/video/wm-<id> ──▶ edge
-watermark  ── SUBSCRIBE live/video ──────────▶ edge ──▶ upstream
-watermark  ── PUBLISH   live/video/wm-<id> ──▶ edge
-```
-
-- The watermark plugin's local session subscribes like any other peer.
-- The default upstream forwards that subscribe.
-- The upstream carries one copy of the source, whatever the subscriber count.
-- The `wm-<id>` subscribe must stay at the edge.
-- It arrives before the watermark plugin publishes `wm-<id>`.
-- Without a hold, the default upstream sends it upstream.
+- `authorize` checks that `wm-<id>` belongs to the subscriber.
+- Its routing hook handles the `wm-<id>` subscribe, before the default upstream.
+- The relay serves it from the plugin's local session, an in-process peer.
+- The local session subscribes to the source track.
+- That subscribe reaches the default upstream like any other.
+- The local session publishes `wm-<id>` with synthesized objects.
 
 ---
 
@@ -142,13 +177,13 @@ watermark  ── PUBLISH   live/video/wm-<id> ──▶ edge
 - Start with Level 1.
 - Land the Level 1 API with Auth, RelayHops and the cache as its first plugins.
 
----
-
 ## Open questions
 
-- Should a request update re-run authorization and filter selection?
-- How does a plugin learn that a track like `wm-<id>` was requested?
-- Which plugin decides where a request with no local publisher goes?
+- In what order do attached filters run, among themselves and against configured ones?
+- For a plugin's own work: should the host offer spawned coroutines, plugin threads, or both?
+  - Keep in mind level 2
+- What host API lets a plugin publish an existing track to one subscriber?
 - How do plugins expose metrics and admin routes?
 - When do we need Level 2?
-- Which plugin beyond Auth, RelayHops and the cache proves the API?
+- What logging facilities does Level 2 give plugins?
+- Plugins that don't fit into this model?

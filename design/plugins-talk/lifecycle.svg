@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 290" font-family="Source Sans Pro, Helvetica, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <style>
+      .node { fill: #f1f3f5; stroke: #868e96; stroke-width: 2; }
+      .hook { fill: #ffe8cc; stroke: #e8590c; stroke-width: 2.5; }
+      .t { font-size: 24px; fill: #212529; text-anchor: middle; }
+      .s { font-size: 17px; fill: #495057; text-anchor: middle; }
+      .l { font-size: 18px; fill: #495057; text-anchor: middle; }
+      .e { stroke: #444; stroke-width: 2; fill: none; marker-end: url(#a); }
+    </style>
+  </defs>
+
+  <rect class="node" x="20" y="40" width="180" height="70" rx="8"/>
+  <text class="t" x="110" y="72">create</text>
+  <text class="s" x="110" y="97">factories, at boot</text>
+
+  <rect class="hook" x="260" y="40" width="200" height="70" rx="8"/>
+  <text class="t" x="360" y="83">start</text>
+
+  <rect class="node" x="520" y="40" width="200" height="70" rx="8"/>
+  <text class="t" x="620" y="72">serve</text>
+  <text class="s" x="620" y="97">sessions accepted</text>
+
+  <rect class="hook" x="780" y="40" width="200" height="70" rx="8"/>
+  <text class="t" x="880" y="83">stop</text>
+
+  <rect class="node" x="1040" y="40" width="140" height="70" rx="8"/>
+  <text class="t" x="1110" y="83">destroy</text>
+
+  <path class="e" d="M200,75 H258"/>
+  <path class="e" d="M460,75 H518"/>
+  <path class="e" d="M720,75 H778"/>
+  <path class="e" d="M980,75 H1038"/>
+
+  <text class="l" x="110" y="160">no side effects</text>
+  <text class="l" x="110" y="190">hooks already work</text>
+
+  <text class="l" x="360" y="160">open sessions</text>
+  <text class="l" x="360" y="190">spawn coroutines</text>
+  <text class="l" x="360" y="220">or start threads</text>
+
+  <text class="l" x="880" y="160">cancel and await spawned work</text>
+  <text class="l" x="880" y="190">join its threads</text>
+</svg>

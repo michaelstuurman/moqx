@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" font-family="Source Sans Pro, Helvetica, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c2410c"/>
+    </marker>
+    <style>
+      .node { fill: #f1f3f5; stroke: #868e96; stroke-width: 2; }
+      .hook { fill: #ffe8cc; stroke: #e8590c; stroke-width: 2.5; }
+      .t { font-size: 24px; fill: #212529; text-anchor: middle; }
+      .l { font-size: 18px; fill: #495057; }
+      .ld { font-size: 18px; fill: #c2410c; }
+      .e { stroke: #444; stroke-width: 2; fill: none; marker-end: url(#a); }
+      .att { stroke: #c2410c; stroke-width: 2; stroke-dasharray: 7 5; fill: none; marker-end: url(#d); }
+    </style>
+  </defs>
+
+  <rect class="node" x="200" y="30" width="240" height="70" rx="8"/>
+  <text class="t" x="320" y="73">config</text>
+
+  <rect class="node" x="760" y="30" width="240" height="70" rx="8"/>
+  <text class="t" x="880" y="73">control plane</text>
+
+  <rect class="node" x="40" y="250" width="220" height="70" rx="8"/>
+  <text class="t" x="150" y="293">relay fanout</text>
+
+  <rect class="hook" x="480" y="250" width="240" height="70" rx="8"/>
+  <text class="t" x="600" y="293">egress filters</text>
+
+  <rect class="node" x="940" y="250" width="220" height="70" rx="8"/>
+  <text class="t" x="1050" y="293">subscriber</text>
+
+  <path class="e" d="M260,285 H478"/>
+  <path class="e" d="M720,285 H938"/>
+
+  <path class="e" d="M320,100 C320,180 540,170 540,248"/>
+  <text class="l" x="300" y="165" text-anchor="end">at subscribe</text>
+  <text class="l" x="300" y="190" text-anchor="end">every subscription</text>
+
+  <path class="att" d="M880,100 C880,180 660,170 660,248"/>
+  <text class="ld" x="900" y="165">any time</text>
+  <text class="ld" x="900" y="190">one subscription or one track</text>
+</svg>
