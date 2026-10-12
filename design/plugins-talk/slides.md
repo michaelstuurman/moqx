@@ -34,7 +34,8 @@
 4. Each `Plugin` creates a `ServicePlugin` per service it applies to.
 5. Each `ServicePlugin` creates its worker instances on every I/O worker.
 6. Each `ServicePlugin` runs its `start` hook, in config order.
-7. The service accepts sessions.
+7. The host builds each listener, with TLS from the transport hooks.
+8. The service accepts sessions.
 
 ---
 
@@ -46,6 +47,17 @@
 - Filtering an object is a data plane hook.
 
 ![Hook points](hooks.svg)
+
+---
+
+## Transport hooks
+
+![Transport hooks](transport.svg)
+
+- Transport hooks run per listener and per handshake, before `admit`.
+- They expose fizz's `CertManager` and `AsyncSelfCert` unchanged.
+
+> **Open question:** One TLS plugin per listener, or a chain?
 
 ---
 
@@ -117,6 +129,29 @@ SUBSCRIBE (+ token) ...  ──▶ authorize
 
 ---
 
+## Use case: TLS keys managed outside moqx
+
+```text
+ClientHello ──▶ getCert(SNI)    ──▶ chain, no private key
+handshake   ──▶ signFuture(...) ──▶ key service ──▶ signature
+```
+
+- The plugin's `CertManager` returns its certificates as `AsyncSelfCert`.
+- `getCert` can't wait, so the plugin keeps the chains in memory.
+- `signFuture` signs through a key service, or fetches the key on first use.
+- The handshake suspends until the signature arrives.
+- The signing call must not block the I/O worker.
+- To rotate, the plugin swaps the certificates `getCert` returns.
+
+> **Open question:** Rotate inside the plugin's `CertManager`, or through a host API that swaps the listener's TLS context?
+
+Note:
+The handshake itself stays in moqx.
+In TLS 1.3 the certificate's private key only signs the handshake.
+The signing service never needs the traffic keys.
+
+---
+
 ## Use case: MoQT track filter (top N)
 
 ```text
@@ -172,6 +207,8 @@ plugin     ── PUBLISH   live/video/wm-<id> ──▶ relay   (new objects)
 
 ---
 
+<!-- .slide: class="scrollable" -->
+
 ## How we start
 
 - Start with Level 1.
@@ -183,7 +220,10 @@ plugin     ── PUBLISH   live/video/wm-<id> ──▶ relay   (new objects)
 - For a plugin's own work: should the host offer spawned coroutines, plugin threads, or both?
   - Keep in mind level 2
 - What host API lets a plugin publish an existing track to one subscriber?
+- One TLS plugin per listener, or a chain?
+- Rotate TLS certificates inside the plugin, or through a host API?
 - How do plugins expose metrics and admin routes?
 - When do we need Level 2?
 - What logging facilities does Level 2 give plugins?
 - Plugins that don't fit into this model?
+  - GOAWAY management: stagger GOAWAYs on signals from the rest of the application?
