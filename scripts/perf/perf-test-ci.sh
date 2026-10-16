@@ -21,6 +21,16 @@
 #   --duration N          Test duration seconds (default: 120)
 #   --io-threads N        Relay IO threads (default: 4)
 #   --client-threads N    Client threads (default: 4)
+#   --quic-stack STACK    Relay QUIC stack: mvfst|picoquic (default: mvfst)
+#   --profile NAME        Workload profile (default: 1mbps)
+#   --target-cpu-pct N    CPU calibration target metadata (default: unset)
+#   --profile-rate-mbps N Nominal profile throughput per subscriber
+#   --first-object-size N Profile's first object size in bytes
+#   --other-object-size N Profile's other object size in bytes
+#   --cc ALGO             Congestion control (default: bbr2 on mvfst, bbr on picoquic)
+#   --cert PATH           TLS cert PEM, path on the relay VM (picoquic only;
+#                         default: mint a throwaway self-signed pair there)
+#   --key PATH            TLS key PEM, path on the relay VM (picoquic only)
 #   --client-args ARGS    Extra flags appended to moqperf_test_client
 #                         e.g. --client-args "--first_object_size=424242 --other_object_size=60606"
 #   --warmup N            Seconds to skip after the client starts before
@@ -48,6 +58,15 @@ IO_THREADS=4
 CLIENT_THREADS=4
 DELIVERY_TIMEOUT=500
 TRANSPORT="quic"
+QUIC_STACK="mvfst"
+PROFILE="1mbps"
+TARGET_CPU_PCT="0"
+PROFILE_RATE_MBPS="1"
+FIRST_OBJECT_SIZE="0"
+OTHER_OBJECT_SIZE="0"
+CC=""              # empty = auto (per-stack BBR spelling); see below
+CERT=""
+KEY=""
 CLIENT_EXTRA_ARGS=()
 WARMUP=""          # empty = auto (subscriber_max/ramp + 10); see below
 COOLDOWN=5
@@ -72,6 +91,15 @@ while [[ $# -gt 0 ]]; do
     --client-args)     read -ra CLIENT_EXTRA_ARGS <<< "$2"; shift 2 ;;
     --delivery-timeout) DELIVERY_TIMEOUT="$2"; shift 2 ;;
     --transport)       TRANSPORT="$2";       shift 2 ;;
+    --quic-stack)      QUIC_STACK="$2";      shift 2 ;;
+    --profile)         PROFILE="$2";         shift 2 ;;
+    --target-cpu-pct)   TARGET_CPU_PCT="$2"; shift 2 ;;
+    --profile-rate-mbps) PROFILE_RATE_MBPS="$2"; shift 2 ;;
+    --first-object-size) FIRST_OBJECT_SIZE="$2"; shift 2 ;;
+    --other-object-size) OTHER_OBJECT_SIZE="$2"; shift 2 ;;
+    --cc)              CC="$2";              shift 2 ;;
+    --cert)            CERT="$2";            shift 2 ;;
+    --key)             KEY="$2";             shift 2 ;;
     --warmup)          WARMUP="$2";          shift 2 ;;
     --cooldown)        COOLDOWN="$2";        shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -101,6 +129,31 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes)
 
 if [[ "$RAMP" -le 0 ]]; then
   echo "ERROR: --ramp must be > 0" >&2; exit 1
+fi
+
+case "$QUIC_STACK" in
+  mvfst|picoquic) ;;
+  *) echo "ERROR: --quic-stack must be 'mvfst' or 'picoquic'" >&2; exit 1 ;;
+esac
+
+RELAY_BIND_ADDR="::"
+[[ "$QUIC_STACK" == "picoquic" ]] && RELAY_BIND_ADDR="0.0.0.0"
+
+# Each stack spells BBR differently and the relay rejects the other's name.
+if [[ -z "$CC" ]]; then
+  case "$QUIC_STACK" in
+    mvfst)    CC="bbr2" ;;
+    picoquic) CC="bbr"  ;;
+  esac
+fi
+
+if [[ -n "$CERT$KEY" ]]; then
+  if [[ "$QUIC_STACK" != "picoquic" ]]; then
+    echo "ERROR: --cert/--key only apply to --quic-stack picoquic" >&2; exit 1
+  fi
+  if [[ -z "$CERT" || -z "$KEY" ]]; then
+    echo "ERROR: --cert and --key must be given together" >&2; exit 1
+  fi
 fi
 
 # Auto measurement warmup: wait out the ramp (subscriber_max/ramp) plus a 10s
@@ -146,6 +199,9 @@ echo "  Subscribers:  $SUBSCRIBER_MAX (ramp $RAMP/s)"
 echo "  Duration:     ${DURATION}s"
 echo "  IO threads:   $IO_THREADS"
 echo "  Transport:    $TRANSPORT"
+echo "  QUIC stack:   $QUIC_STACK (cc $CC)"
+echo "  Profile:      $PROFILE (CPU calibration target ${TARGET_CPU_PCT}%, nominal ${PROFILE_RATE_MBPS} Mbps/subscriber)"
+echo "  Bind address: $RELAY_BIND_ADDR"
 [[ ${#CLIENT_EXTRA_ARGS[@]} -gt 0 ]] && echo "  Client args:  ${CLIENT_EXTRA_ARGS[*]}"
 echo "  Warmup:       ${WARMUP}s (skip after client start)"
 echo "  Cooldown:     ${COOLDOWN}s (skip before client end)"
@@ -153,11 +209,13 @@ echo "════════════════════════�
 
 # ── Remote directory setup ─────────────────────────────────────────────────────
 REMOTE_DIR="/tmp/moqx-perf-ci"
+RELAY_LOG_OUTPUT="${OUTPUT%.json}.relay.log"
+CLIENT_LOG_OUTPUT="${OUTPUT%.json}.client.log"
 
 timeout 5 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "mkdir -p $REMOTE_DIR" || true
-timeout 5 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "pkill -f 'moqx.*perf-ci' 2>/dev/null || true; pkill -f moqtest_server 2>/dev/null || true" || true
+timeout 5 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "pkill -f '^${REMOTE_DIR}/moqx' 2>/dev/null || true; pkill -f '^${REMOTE_DIR}/moqtest_server' 2>/dev/null || true; pkill -f '^bash ${REMOTE_DIR}/perf-metrics.sh' 2>/dev/null || true" || true
 timeout 5 ssh "${SSH_OPTS[@]}" "$CLIENT_HOST" "mkdir -p $REMOTE_DIR" || true
-timeout 5 ssh "${SSH_OPTS[@]}" "$CLIENT_HOST" "pkill -f moqperf_test_client 2>/dev/null || true" || true
+timeout 5 ssh "${SSH_OPTS[@]}" "$CLIENT_HOST" "pkill -f '^${REMOTE_DIR}/moqperf_test_client' 2>/dev/null || true" || true
 
 # ── Deploy binaries ────────────────────────────────────────────────────────────
 echo "Deploying binaries..."
@@ -176,34 +234,61 @@ if ! ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "command -v envsubst >/dev/null 2>&1"; t
   echo "ERROR: envsubst not found on $RELAY_HOST (install gettext-base)" >&2; exit 1
 fi
 
+# ── TLS for picoquic ──────────────────────────────────────────────────────────
+# picoquic refuses `insecure: true`, so it needs a cert/key on the relay VM.
+# Nothing verifies it — both moqtest_server and moqperf_test_client use
+# moxygen's insecure verifier — so a throwaway self-signed pair is enough.
+RELAY_TLS_ARGS="--insecure"
+if [[ "$QUIC_STACK" == "picoquic" ]]; then
+  if [[ -z "$CERT" ]]; then
+    CERT="${REMOTE_DIR}/cert.pem"
+    KEY="${REMOTE_DIR}/key.pem"
+    if ! ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "command -v openssl >/dev/null 2>&1"; then
+      echo "ERROR: --quic-stack picoquic needs a cert; openssl not found on $RELAY_HOST" >&2
+      echo "       install openssl there or pass --cert/--key" >&2; exit 1
+    fi
+    echo "Minting self-signed cert on $RELAY_HOST..."
+    ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "
+      openssl req -x509 -newkey rsa:2048 -nodes -keyout '${KEY}' -out '${CERT}' \
+        -days 1 -subj '/CN=localhost' >/dev/null 2>&1
+    " || { echo "ERROR: failed to generate a self-signed cert on $RELAY_HOST" >&2; exit 1; }
+  else
+    ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "[ -r '${CERT}' ] && [ -r '${KEY}' ]" \
+      || { echo "ERROR: TLS cert/key not readable on $RELAY_HOST: $CERT $KEY" >&2; exit 1; }
+  fi
+  RELAY_TLS_ARGS="--cert ${CERT} --key ${KEY}"
+fi
+
 # ── Cleanup trap ───────────────────────────────────────────────────────────────
 cleanup() {
   echo "Cleaning up remote processes..."
-  timeout 5 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "pkill -f '${REMOTE_DIR}/moqx' 2>/dev/null || true; pkill -f '${REMOTE_DIR}/moqtest_server' 2>/dev/null || true; pkill -f '${REMOTE_DIR}/perf-metrics.sh' 2>/dev/null || true" 2>/dev/null || true
-  timeout 5 ssh "${SSH_OPTS[@]}" "$CLIENT_HOST" "pkill -f '${REMOTE_DIR}/moqperf_test_client' 2>/dev/null || true" 2>/dev/null || true
+  timeout 5 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "cat ${REMOTE_DIR}/relay.log" > "$RELAY_LOG_OUTPUT" 2>/dev/null || true
+  timeout 5 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "pkill -f '^${REMOTE_DIR}/moqx' 2>/dev/null || true; pkill -f '^${REMOTE_DIR}/moqtest_server' 2>/dev/null || true; pkill -f '^bash ${REMOTE_DIR}/perf-metrics.sh' 2>/dev/null || true" 2>/dev/null || true
+  timeout 5 ssh "${SSH_OPTS[@]}" "$CLIENT_HOST" "pkill -f '^${REMOTE_DIR}/moqperf_test_client' 2>/dev/null || true" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 # ── Start relay (via moqx-run.sh + config.bench.yaml on the relay VM) ──────────
 # Mirrors scripts/perf/perf-test.sh's relay launch so both harnesses share identical
-# tuning (thread count, flow control, UDP buffer, bbr2, GSO, recv batch). This
+# tuning (thread count, flow control, UDP buffer, cc, GSO, recv batch). This
 # is what makes --io-threads actually take effect and stops CI trend drift.
-echo "Starting relay on $RELAY_HOST (io_threads=$IO_THREADS)..."
+echo "Starting relay on $RELAY_HOST (quic_stack=$QUIC_STACK, bind=$RELAY_BIND_ADDR, io_threads=$IO_THREADS)..."
 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "
   ulimit -n 65536 2>/dev/null || true
   nohup env LD_LIBRARY_PATH=${REMOTE_DIR}/lib \
     MOQX_RELAY_ID=perf-ci-relay \
     MOQX_RESOLVED_CONFIG=${REMOTE_DIR}/relay.yaml \
     bash ${REMOTE_DIR}/moqx-run.sh \
-      --insecure --no-cache --ignore-path-mtu \
+      ${RELAY_TLS_ARGS} --no-cache --ignore-path-mtu \
       --bin        ${REMOTE_DIR}/moqx \
       --config     ${REMOTE_DIR}/config.bench.yaml \
-      --bind       :: \
+      --bind       ${RELAY_BIND_ADDR} \
       --port       ${RELAY_PORT} \
       --admin-port ${ADMIN_PORT} \
       --endpoint   /moq-relay \
       --threads    ${IO_THREADS} \
-      --cc         bbr2 \
+      --quic-stack ${QUIC_STACK} \
+      --cc         ${CC} \
       --relay-thread --no-local-forwarders \
       > ${REMOTE_DIR}/relay.log 2>&1 &
   echo \$!
@@ -259,11 +344,6 @@ until ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "
 done
 echo "Publisher connected"
 
-# ── Capture pre-test system state ─────────────────────────────────────────────
-PRE_RSS=$(ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "
-  cat /proc/${RELAY_PID}/status 2>/dev/null | grep VmRSS | awk '{print \$2}' || echo 0
-")
-
 # ── Run performance test client ───────────────────────────────────────────────
 RELAY_IP=$(ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "hostname -I | awk '{print \$1}'")
 CLIENT_RELAY_URL="https://${RELAY_IP}:${RELAY_PORT}/moq-relay"
@@ -294,7 +374,7 @@ CLIENT_OUTPUT=$(ssh "${SSH_OPTS[@]}" "$CLIENT_HOST" "
     --num_threads=${CLIENT_THREADS} \
     ${CLIENT_EXTRA_ARGS_ESCAPED} \
     2>&1
-" | tee /tmp/perf-client-output.txt)
+" | tee "$CLIENT_LOG_OUTPUT")
 
 echo "---"
 echo "Client finished"
@@ -316,6 +396,9 @@ ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "cat ${REMOTE_DIR}/metrics.log 2>/dev/null" >
 
 WIN_START=$(( (MEASURE_START_EPOCH - POLLER_START_EPOCH) + WARMUP ))
 WIN_END=$(( (MEASURE_END_EPOCH - POLLER_START_EPOCH) - COOLDOWN ))
+# Same window in the client's [AGGREGATE] seconds, which count from client start.
+CLIENT_WIN_START=$WARMUP
+CLIENT_WIN_END=$(( (MEASURE_END_EPOCH - MEASURE_START_EPOCH) - COOLDOWN ))
 
 if [[ -s /tmp/perf-metrics-full.log ]]; then
   awk -F'\t' -v s="$WIN_START" -v e="$WIN_END" \
@@ -350,7 +433,7 @@ NET_THROUGHPUT=$(metrics_col_avg "ext_Mbps" "%.1f")
 # ── Parse results and generate JSON ──────────────────────────────────────────
 echo "Generating results JSON..."
 bash "$REPO/scripts/perf/perf-results-to-json.sh" \
-  --client-output /tmp/perf-client-output.txt \
+  --client-output "$CLIENT_LOG_OUTPUT" \
   --metrics-log /tmp/perf-metrics.log \
   --commit "$COMMIT_SHA" \
   --branch "$BRANCH" \
@@ -360,13 +443,20 @@ bash "$REPO/scripts/perf/perf-results-to-json.sh" \
   --duration "$DURATION" \
   --io-threads "$IO_THREADS" \
   --client-threads "$CLIENT_THREADS" \
-  --client-window-start "$WIN_START" \
-  --client-window-end "$WIN_END" \
+  --client-window-start "$CLIENT_WIN_START" \
+  --client-window-end "$CLIENT_WIN_END" \
   --relay-cpu "$CPU_AVG" \
   --relay-rss-kb "$POST_RSS" \
   --net-throughput-mbps "$NET_THROUGHPUT" \
   --delivery-timeout "$DELIVERY_TIMEOUT" \
   --transport "$TRANSPORT" \
+  --quic-stack "$QUIC_STACK" \
+  --profile "$PROFILE" \
+  --target-cpu-pct "$TARGET_CPU_PCT" \
+  --profile-rate-mbps "$PROFILE_RATE_MBPS" \
+  --first-object-size "$FIRST_OBJECT_SIZE" \
+  --other-object-size "$OTHER_OBJECT_SIZE" \
+  --cc "$CC" \
   --output "$OUTPUT"
 
 echo "═══════════════════════════════════════════════════════════"

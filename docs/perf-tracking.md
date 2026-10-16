@@ -27,9 +27,9 @@ untrusted PR code.
   This is the only trigger that publishes to GitHub Pages.
 - **Manual run:** Actions tab → `perf test` (`workflow_dispatch`). Pick the
   branch/tag under test in the native **"Use workflow from"** selector, then
-  tune `subscribers`/`duration`, toggle `compare` to render a regression report,
-  and set `pr` to also post that report as a PR comment. Manual runs upload
-  artifacts but do not publish to the trend.
+  choose a `profile`, `target_cpu_pct`, duration, and stack selection.
+  Set `subscribers` only to override the profile-derived count for a smoke run.
+  Manual runs upload artifacts but do not publish to the trend.
 - **Reusable call:** from another workflow via `workflow_call` (this form takes
   an explicit `ref` input for the commit/branch/tag to test).
 
@@ -38,18 +38,65 @@ Supported `workflow_dispatch` inputs (schedule runs use the defaults below):
 | Input | Default | Description |
 |---|---:|---|
 | `duration` | `120` | Test duration in seconds |
-| `subscribers` | `100` | Peak subscribers |
+| `profile` | `all` | Run all profiles or one of `1mbps`, `4mbps`, `16mbps` |
+| `target_cpu_pct` | `300` | CPU calibration target; 300% is 75% of four cores |
+| `subscribers` | `0` | Optional override shared by both stacks; zero uses the scaled profile count |
+| `quic_stack` | `both` | Run `both`, `mvfst`, or `picoquic` |
+| `mvfst_cc` | `native` | mvfst CC override: `native` (`bbr2`), `bbr`, or `bbr2` |
 | `compare` | `true` | Compare against the published baseline and render a report into the step summary |
 | `pr` | _(blank)_ | PR number to also post the report to; blank = report stays in the step summary only |
+
+The nightly run and default manual dispatch test each profile against both
+stacks sequentially on the same VM pair. They are not a matrix because the
+relay and metrics poller are host-global. Profiles are defined in
+[`scripts/perf/profiles.json`](/scripts/perf/profiles.json):
+
+| Profile | Nominal Mbps/subscriber | Subscribers at 300% CPU | First object bytes | Other object bytes |
+|---|---:|---:|---:|---:|
+| `1mbps` | 1 | 728 | 26,516 | 3,788 |
+| `4mbps` | 4 | 256 | 106,064 | 26,516 |
+| `16mbps` | 16 | 144 | 424,242 | 60,606 |
+
+Each profile defines `subscribers_at_300pct_cpu`, currently calibrated from
+mvfst (`bbr2`) runs on the dedicated four-core relay VM. These counts estimate
+slightly above 300% CPU; they are not an adaptive CPU limiter or a guarantee.
+The workflow scales counts as
+`max(8, ceil(subscribers_at_300pct_cpu * target_cpu_pct / 300 / 8) * 8)`.
+Rounding to a multiple of 8 gives the client's eight threads equal subscriber
+allocations. Both stacks receive the same derived count and client parameters,
+so Picoquic may use less CPU on the identical workload.
+`subscribers` overrides the derived count for both stacks; use a multiple of 8
+to avoid the client truncating the count. Results record `target_cpu_pct`, the
+subscriber count, nominal profile rate, and object sizes. The runner takes
+`--subscriber-max` as the actual count; its `--target-cpu-pct` option records
+metadata only and does not change that count or enforce a CPU limit.
+The optional `mvfst_cc` dispatch input supports controlled CC experiments;
+use `compare: false` for overrides because published baselines are currently
+grouped by profile and stack, not congestion control.
+
+The 1 Mbps profile keeps the existing result filenames
+(`run-<sha>-mvfst.json` and `run-<sha>-picoquic.json`). Higher-rate profiles use
+profile-qualified filenames, so existing 1 Mbps history remains valid and new
+profiles are additive. Historical records without `params.profile` are treated
+as `1mbps`; comparisons are isolated by both profile and stack. All requested
+profile/stack cases are attempted. If any case fails, the workflow fails after
+recording the successful results and failed cases. The step summary, successful
+partial results, and diagnostic logs are retained, but nightly publication is
+skipped.
+
+The dashboard defaults to Overview. It shows the latest throughput/core result
+for each profile and stack, followed by one history chart per profile with both
+stacks overlaid. Compare mode shows all tracked metrics for both stacks within
+the selected profile; Single mode shows one stack's history. The profile
+selector appears to the right of the mode selector in Compare and Single modes.
+Stack colors and line styles are consistent across modes.
 
 > **Branch under test:** there is no `ref` dispatch input — the run tests
 > whatever branch/tag is chosen in "Use workflow from". The `ref` input exists
 > only on the `workflow_call` form for programmatic callers.
 
-> **Subscriber note:** `workflow_dispatch` defaults `subscribers` to `100` for
-> quick smoke runs, while the nightly trend is captured at `1000`. The
-> comparison always scores against the published `main` trend, so for a
-> meaningful report dispatch with `subscribers: 1000`.
+> **Subscriber note:** use `subscribers` as a temporary override for smoke
+> runs. Normal runs derive counts from `target_cpu_pct` and the selected profile.
 
 > **Referencing a run on a PR without posting:** leave `pr` blank. The
 > comparison report is always written to the run's **step summary**, whose URL
@@ -89,20 +136,62 @@ Supported `workflow_dispatch` inputs (schedule runs use the defaults below):
 | Total Resets | count | ✗ | 50% |
 | UDP Errors/s | count | ✗ | 50% |
 
-Regression detection uses a rolling 10-run average on `main` as baseline.
-Warnings are non-blocking (PRs are not failed).
+Regression detection uses a rolling 10-run average on `main` for the same QUIC
+stack and workload profile. Missing `schema_version`, `params.quic_stack`, and
+`params.profile` in historical results are treated as version 1, mvfst, and
+`1mbps` respectively. Warnings are non-blocking (PRs are not failed).
+
+From schema version 3, client metrics (throughput, peak throughput, totals,
+resets, failures, latency) cover only the steady-state window
+(`params.client_window`, client seconds after warmup and before cooldown).
+Earlier runs averaged throughput over the full run, including ramp-up and
+teardown, so v3 throughput is about 5% higher. `throughput_full_run_mbps`
+keeps the old calculation for continuity.
+
+Schema version 4 records the CPU calibration target as `params.target_cpu_pct`.
+Client-stat anomaly detection checks full-run totals
+against measured throughput and flags peaks above ten times the full-run
+throughput; it no longer uses an assumed aggregate throughput target.
+
+On the first nightly run with the profile matrix, only `mvfst/1mbps` has a
+compatible published baseline: legacy runs are interpreted as that series.
+The other profiles and picoquic start without a baseline and become comparable
+as nightly results accumulate. Comparisons are isolated by profile and stack,
+not by CPU target or subscriber override; use `compare: false` for nonstandard
+load experiments and while establishing a baseline for the recalibrated counts.
+
+### Preserving Published History
+
+The nightly publisher requires the published manifest and every retained run
+file to download and validate before it stages a Pages deployment. A failed
+request, malformed manifest, missing run file, or invalid run JSON fails the
+`perf` job, which prevents deployment and leaves the current dashboard intact.
+
+For a genuine first deployment only, set the repository Actions variable
+`MOQX_PERF_ALLOW_EMPTY_BASELINE` to `true` for the scheduled bootstrap run, then
+remove it. This permits an HTTP 404 for `index.json` to mean an empty baseline;
+network errors, other HTTP statuses, and missing or invalid run files still fail
+the job.
+
+### Stack Comparability
+
+Each stack uses its native congestion-control spelling and algorithm: mvfst
+runs use `bbr2`, while picoquic runs use `bbr`. Consequently, differences
+between the two trend lines reflect both QUIC implementation and congestion
+control; cross-stack throughput comparisons are indicative, not controlled.
+Use each stack's own history to evaluate regressions.
 
 ## Test Parameters
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Subscribers | 1000 | Enough to stress relay fan-out |
-| Ramp rate | 100/s | 10s to reach peak, then 110s steady state |
+| Subscribers | 728, 256, or 144 at the default 300% CPU calibration target | Shared by both stacks; proportional CPU scaling rounds up to a multiple of 8; `subscribers` can override |
+| Ramp rate | 150/s | Fixed by the workflow |
 | Duration | 120s | Stable measurement window |
 | IO threads | 4 | Matches VM core count |
-| Client threads | 4 | Matches client VM cores |
+| Client threads | 8 | Fixed by the workflow |
 | Transport | QUIC | Primary protocol |
-| Delivery timeout | 500ms | Detects latency regressions |
+| Client delivery timeout | 5000ms | Passed through the runner and recorded in result JSON |
 
 ## Infrastructure Setup (One-Time)
 
@@ -146,17 +235,23 @@ ssh-copy-id -i perf-key.pub root@<relay-ip>
 ssh-copy-id -i perf-key.pub root@<client-ip>
 ```
 
-### 4. Add GitHub Secrets
+### 4. Add GitHub Secrets and Variables
 
 In the repository settings → Secrets and variables → Actions:
 
 | Secret | Value |
 |--------|-------|
-| `OMOQ_APP_ID` | GitHub App id used for checkout/tokened operations |
+| `OMOQ_APP_ID` | Numeric GitHub App ID used by other workflows that still accept `app-id` |
 | `OMOQ_APP_PRIV_KEY` | GitHub App private key |
 | `PERF_SSH_KEY` | Contents of `perf-key` (private key) |
 | `PERF_RELAY_HOST` | `root@<relay-ip>` |
 | `PERF_CLIENT_HOST` | `root@<client-ip>` |
+
+Add this repository Actions variable for `perf-test.yml`'s GitHub App token steps:
+
+| Variable | Value |
+|----------|-------|
+| `OMOQ_APP_CLIENT_ID` | Client ID from the GitHub App settings (not the numeric App ID) |
 
 ### 5. Enable GitHub Pages (GitHub Actions Source)
 
@@ -201,5 +296,6 @@ queue and execute sequentially to avoid conflicting on the shared VMs.
 
 ## Data Retention
 
-The Pages payload keeps a rolling 180-run window (~6 months at 1 run/day).
-The manifest is rebuilt newest-first and capped during staging.
+The Pages payload keeps up to 1080 run files, enough for roughly 180 nightly
+points for each of three profiles across two stacks (about six months). The
+manifest is rebuilt newest-first and capped during staging.

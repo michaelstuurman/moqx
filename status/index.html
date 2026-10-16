@@ -10,7 +10,7 @@
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
   h1 { font-size: 1.5rem; margin-bottom: 8px; }
   .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 0.9rem; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 24px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 24px; margin-bottom: 24px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .card h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
   canvas { width: 100% !important; height: 200px !important; }
@@ -19,12 +19,56 @@
   .stat .value { font-size: 1.5rem; font-weight: 600; color: #58a6ff; }
   .stat .label { font-size: 0.75rem; color: #8b949e; margin-top: 2px; }
   .stat.regression .value { color: #f85149; }
-  .filters { margin-bottom: 16px; display: flex; gap: 12px; align-items: center; }
+  .stack-stat.mvfst .value, .stack-name.mvfst { color: #58a6ff; }
+  .stack-stat.picoquic .value, .stack-name.picoquic { color: #f0883e; }
+  .filters { margin-bottom: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .filters label { display: flex; align-items: center; gap: 6px; }
+  .mode-stack-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .filters #profile-control[hidden], .filters #stack-control[hidden], .grid[hidden] { display: none; }
+  .mode-stack-controls #stack-control[hidden] { display: none; }
   .filters select, .filters input { background: #21262d; border: 1px solid #30363d; color: #e6edf3; padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; }
+  .mode-switch { display: inline-flex; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+  .mode-switch button { border: 0; background: #21262d; color: #8b949e; padding: 6px 10px; font: inherit; font-size: 0.85rem; cursor: pointer; }
+  .mode-switch button + button { border-left: 1px solid #30363d; }
+  .mode-switch button[aria-pressed="true"] { background: #24466a; color: #e6edf3; }
+  .mode-switch button:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+  .comparison-summary { display: block; width: 100%; overflow-x: auto; }
+  .stack-comparison { width: 100%; min-width: 1120px; border-collapse: collapse; background: #161b22; }
+  .stack-comparison th, .stack-comparison td { padding: 10px 12px; border-bottom: 1px solid #30363d; text-align: right; white-space: nowrap; }
+  .stack-comparison thead th { color: #8b949e; font-size: 0.72rem; font-weight: 500; }
+  .stack-comparison tbody th { text-align: left; }
+  .stack-comparison tbody td { font-size: 0.9rem; font-weight: 600; }
+  .stack-comparison td.better { color: #55ee55; }
+  .stack-comparison tr.mvfst th { border-left: 3px solid #58a6ff; }
+  .stack-comparison tr.picoquic th { border-left: 3px dashed #f0883e; }
+  .stack-name, .stack-cc { display: block; }
+  .stack-cc { color: #8b949e; font-size: 0.72rem; font-weight: 400; }
+  .overview-summary { display: block; width: 100%; overflow-x: auto; }
+  .overview-table { width: 100%; min-width: 1120px; border-collapse: collapse; background: #161b22; }
+  .overview-table caption { padding: 0 12px 8px; color: #8b949e; font-size: 0.75rem; text-align: left; }
+  .overview-table th, .overview-table td { padding: 10px 12px; border-bottom: 1px solid #30363d; text-align: right; white-space: nowrap; }
+  .overview-table thead th { color: #8b949e; font-size: 0.75rem; font-weight: 500; }
+  .overview-table tbody th { text-align: left; }
+  .overview-table tbody td { font-size: 0.95rem; font-weight: 600; }
+  .overview-table td.better { color: #55ee55; }
+  .overview-table tr.mvfst th { border-left: 3px solid #58a6ff; }
+  .overview-table tr.picoquic th { border-left: 3px dashed #f0883e; }
+  #overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   a { color: #58a6ff; text-decoration: none; }
   a:hover { text-decoration: underline; }
   .loading { text-align: center; padding: 40px; color: #8b949e; }
   .commit-link { font-family: monospace; font-size: 0.8rem; }
+  @media (max-width: 600px) {
+    body { padding: 16px; }
+    .filters label { flex: 1 1 calc(50% - 12px); min-width: 0; justify-content: space-between; }
+    .mode-stack-controls { flex: 1 1 100%; }
+    .mode-stack-controls #profile-control, .mode-stack-controls #stack-control { flex: 1 1 120px; }
+    .filters select { min-width: 0; max-width: 70%; }
+    .grid { gap: 16px; }
+    .summary { gap: 8px; }
+    .stat { flex: 1 1 140px; min-width: 0; }
+    #overview-grid { grid-template-columns: minmax(0, 1fr); }
+  }
 </style>
 </head>
 <body>
@@ -38,19 +82,75 @@
       <option value="main">main</option>
     </select>
   </label>
-  <label>Window:
+  <div class="mode-stack-controls">
+    <div class="mode-switch" role="group" aria-label="Dashboard mode">
+      <button type="button" data-mode="overview" aria-pressed="true">Overview</button>
+      <button type="button" data-mode="compare" aria-pressed="false">Compare stacks</button>
+      <button type="button" data-mode="single" aria-pressed="false">Single</button>
+    </div>
+    <label id="profile-control" hidden>Profile:
+      <select id="profile-filter">
+        <option value="1mbps">1 Mbps</option>
+      </select>
+    </label>
+    <label id="stack-control" hidden>Stack:
+      <select id="stack-filter">
+        <option value="mvfst">mvfst</option>
+      </select>
+    </label>
+  </div>
+  <label><span id="window-label">Window:</span>
     <select id="window-filter">
       <option value="30">Last 30 runs</option>
       <option value="60">Last 60 runs</option>
       <option value="90" selected>Last 90 runs</option>
-      <option value="180">All (180)</option>
+      <option value="180">Last 180 runs</option>
     </select>
   </label>
 </div>
 
 <div id="summary" class="summary"></div>
 
-<div class="grid">
+<div id="overview-grid" class="grid" hidden>
+  <div class="card">
+    <h3>1 Mbps · Throughput per Core</h3>
+    <canvas id="chart-overview-1mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>4 Mbps · Throughput per Core</h3>
+    <canvas id="chart-overview-4mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>16 Mbps · Throughput per Core</h3>
+    <canvas id="chart-overview-16mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>1 Mbps · Throughput</h3>
+    <canvas id="chart-overview-throughput-1mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>4 Mbps · Throughput</h3>
+    <canvas id="chart-overview-throughput-4mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>16 Mbps · Throughput</h3>
+    <canvas id="chart-overview-throughput-16mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>1 Mbps · Relay CPU</h3>
+    <canvas id="chart-overview-cpu-1mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>4 Mbps · Relay CPU</h3>
+    <canvas id="chart-overview-cpu-4mbps"></canvas>
+  </div>
+  <div class="card">
+    <h3>16 Mbps · Relay CPU</h3>
+    <canvas id="chart-overview-cpu-16mbps"></canvas>
+  </div>
+</div>
+
+<div id="metrics-grid" class="grid" hidden>
    <div class="card">
     <h3>Peak Subscribers</h3>
     <canvas id="chart-subscribers"></canvas>
@@ -100,9 +200,42 @@ const CHART_COLORS = {
   warning: '#d29922',
   danger: '#f85149',
 };
+const STACK_COLORS = {
+  mvfst: '#58a6ff',
+  picoquic: '#f0883e',
+};
+const PROFILE_IDS = ['1mbps', '4mbps', '16mbps'];
+const CHARTS = [
+  ['chart-subscribers', 'peak_subscribers', CHART_COLORS.secondary],
+  ['chart-throughput', 'throughput_mbps', CHART_COLORS.primary],
+  ['chart-throughput-core', 'throughput_per_core_mbps', CHART_COLORS.primary],
+  ['chart-latency', 'avg_latency_ms', CHART_COLORS.secondary],
+  ['chart-delivery', 'delivery_success_pct', CHART_COLORS.secondary],
+  ['chart-resets', 'total_resets', CHART_COLORS.danger],
+  ['chart-cpu', 'relay_cpu_pct', CHART_COLORS.warning],
+  ['chart-rss', 'relay_rss_mb', CHART_COLORS.warning],
+  ['chart-rss-session', 'rss_per_session_kb', CHART_COLORS.warning],
+];
 
 let allData = [];
 let charts = {};
+let viewMode = 'overview';
+
+function getRunStack(run) {
+  return run?.params?.quic_stack || 'mvfst';
+}
+
+function getRunProfile(run) {
+  return run?.params?.profile || '1mbps';
+}
+
+function isMeaningfullyBetter(value, otherValue, higherIsBetter) {
+  if (!Number.isFinite(value) || !Number.isFinite(otherValue)) return false;
+  const difference = Math.abs(value - otherValue);
+  const scale = Math.max(Math.abs(value), Math.abs(otherValue));
+  if (difference === 0 || difference / scale <= 0.01) return false;
+  return higherIsBetter ? value > otherValue : value < otherValue;
+}
 
 function populateBranchFilter() {
   const select = document.getElementById('branch-filter');
@@ -126,6 +259,40 @@ function populateBranchFilter() {
   select.value = branches.includes('main') ? 'main' : branches[0];
 }
 
+function populateStackFilter() {
+  const select = document.getElementById('stack-filter');
+  const available = new Set(allData.map(getRunStack));
+  const stacks = ['mvfst', 'picoquic'].filter(stack => available.has(stack));
+  for (const stack of available) {
+    if (!stacks.includes(stack)) stacks.push(stack);
+  }
+
+  select.replaceChildren(...stacks.map(stack => {
+    const option = document.createElement('option');
+    option.value = stack;
+    option.textContent = stack;
+    return option;
+  }));
+  select.value = stacks.includes('mvfst') ? 'mvfst' : (stacks[0] || 'mvfst');
+}
+
+function populateProfileFilter() {
+  const select = document.getElementById('profile-filter');
+  const available = new Set(allData.map(getRunProfile));
+  const profiles = ['1mbps', '4mbps', '16mbps'].filter(profile => available.has(profile));
+  for (const profile of available) {
+    if (!profiles.includes(profile)) profiles.push(profile);
+  }
+
+  select.replaceChildren(...profiles.map(profile => {
+    const option = document.createElement('option');
+    option.value = profile;
+    option.textContent = profile.replace('mbps', ' Mbps');
+    return option;
+  }));
+  select.value = profiles.includes('1mbps') ? '1mbps' : (profiles[0] || '1mbps');
+}
+
 async function loadData() {
   try {
     const resp = await fetch(`${DATA_BASE_URL}/index.json`, { cache: 'no-store' });
@@ -144,6 +311,8 @@ async function loadData() {
 
     allData = results.filter(Boolean).reverse(); // chronological order
     populateBranchFilter();
+    populateStackFilter();
+    populateProfileFilter();
     document.getElementById('loading').style.display = 'none';
     renderDashboard();
   } catch (e) {
@@ -153,50 +322,194 @@ async function loadData() {
 
 function getFilteredData() {
   const branch = document.getElementById('branch-filter').value;
+  const stack = document.getElementById('stack-filter').value;
+  const profile = document.getElementById('profile-filter').value;
   const window = parseInt(document.getElementById('window-filter').value);
-  let filtered = allData.filter(d => d.branch === branch);
+  let filtered = allData.filter(d => d.branch === branch && getRunStack(d) === stack && getRunProfile(d) === profile);
   return filtered.slice(-window);
 }
 
+function getComparisonData(selectedProfile = document.getElementById('profile-filter').value) {
+  const branch = document.getElementById('branch-filter').value;
+  const window = parseInt(document.getElementById('window-filter').value);
+  const groups = new Map();
+
+  for (const run of allData) {
+    if (run.branch !== branch) continue;
+    if (getRunProfile(run) !== selectedProfile) continue;
+    const stack = getRunStack(run);
+    if (!Object.prototype.hasOwnProperty.call(STACK_COLORS, stack)) continue;
+    const runId = run.workflow_run_id;
+    const key = runId || run.commit || run.commit_short || `${run.timestamp || '?'}-${stack}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: runId ? runId.slice(-6) : run.commit_short || run.commit?.slice(0, 7) || '?',
+        timestamp: run.timestamp || '',
+        runs: {},
+      });
+    }
+    const group = groups.get(key);
+    group.runs[stack] = run;
+    if (run.timestamp > group.timestamp) group.timestamp = run.timestamp;
+  }
+
+  return Array.from(groups.values())
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+    .slice(-window);
+}
+
 function renderDashboard() {
-  const data = getFilteredData();
+  Object.values(charts).forEach(chart => chart.destroy());
+  charts = {};
+
+  const branch = document.getElementById('branch-filter').value;
+  const overview = viewMode === 'overview';
+  const overviewGrid = document.getElementById('overview-grid');
+  const metricsGrid = document.getElementById('metrics-grid');
+  overviewGrid.hidden = !overview;
+  metricsGrid.hidden = overview;
+  const data = overview
+    ? allData.filter(run => run.branch === branch)
+    : viewMode === 'compare' ? getComparisonData() : getFilteredData();
   if (data.length === 0) {
+    document.getElementById('summary').replaceChildren();
     document.getElementById('loading').textContent = 'No data for selected filters.';
     document.getElementById('loading').style.display = 'block';
     return;
   }
   document.getElementById('loading').style.display = 'none';
 
-  renderSummary(data);
-  renderChart('chart-throughput', data, 'throughput_mbps', CHART_COLORS.primary);
-  renderChart('chart-throughput-core', data, 'throughput_per_core_mbps', CHART_COLORS.primary);
-  renderChart('chart-subscribers', data, 'peak_subscribers', CHART_COLORS.secondary);
-  renderChart('chart-delivery', data, 'delivery_success_pct', CHART_COLORS.secondary);
-  renderChart('chart-cpu', data, 'relay_cpu_pct', CHART_COLORS.warning);
-  renderChart('chart-rss', data, 'relay_rss_mb', CHART_COLORS.warning);
-  renderChart('chart-rss-session', data, 'rss_per_session_kb', CHART_COLORS.warning);
-  renderChart('chart-resets', data, 'total_resets', CHART_COLORS.danger);
-  renderChart('chart-latency', data, 'avg_latency_ms', CHART_COLORS.secondary);
+  if (overview) {
+    renderOverviewSummary(data);
+    for (const [suffix, metric] of [
+      ['', 'throughput_per_core_mbps'],
+      ['-throughput', 'throughput_mbps'],
+      ['-cpu', 'relay_cpu_pct'],
+    ]) {
+      for (const profile of PROFILE_IDS) {
+        renderComparisonChart(`chart-overview${suffix}-${profile}`, getComparisonData(profile), metric);
+      }
+    }
+    return;
+  }
+
+  if (viewMode === 'compare') {
+    renderComparisonSummary(data);
+  } else {
+    renderSummary(data);
+  }
+  for (const [canvasId, metric, color] of CHARTS) {
+    if (viewMode === 'compare') {
+      renderComparisonChart(canvasId, data, metric);
+    } else {
+      renderChart(canvasId, data, metric, color);
+    }
+  }
 }
 
 function renderSummary(data) {
-  const latest = data[data.length - 1];
-  const r = latest.results;
+  const stack = document.getElementById('stack-filter').value;
+  renderRunSummary([{stack, run: data[data.length - 1]}]);
+}
+
+function renderComparisonSummary(data) {
+  renderRunSummary(['mvfst', 'picoquic'].map(stack => {
+    const runs = data.map(group => group.runs[stack]).filter(Boolean);
+    return {stack, run: runs[runs.length - 1] || null};
+  }));
+}
+
+function renderRunSummary(stackRuns) {
   const container = document.getElementById('summary');
+  container.className = 'summary comparison-summary';
+  const resultsByStack = new Map(stackRuns.map(({stack, run}) => [stack, run?.results || {}]));
+  const betterClass = (stack, metric, higherIsBetter) => {
+    const value = resultsByStack.get(stack)?.[metric];
+    const otherStack = stack === 'mvfst' ? 'picoquic' : 'mvfst';
+    const otherValue = resultsByStack.get(otherStack)?.[metric];
+    return isMeaningfullyBetter(value, otherValue, higherIsBetter) ? 'better' : '';
+  };
+  const rows = stackRuns.map(({stack, run}) => {
+    const results = run?.results || {};
+    const params = run?.params || {};
+    const commit = run?.commit;
+    const commitLabel = run?.commit_short || commit?.slice(0, 7) || '—';
+    return `
+      <tr class="${stack}">
+        <th scope="row"><span class="stack-name ${stack}">${stack}</span><span class="stack-cc">CC · ${params.cc || 'unknown'}</span></th>
+        <td class="${betterClass(stack, 'throughput_mbps', true)}">${results.throughput_mbps ?? '—'} Mbps</td>
+        <td class="${betterClass(stack, 'throughput_per_core_mbps', true)}">${results.throughput_per_core_mbps ?? '—'} Mbps</td>
+        <td>${results.peak_subscribers ?? '—'}</td>
+        <td class="${betterClass(stack, 'relay_cpu_pct', false)}">${results.relay_cpu_pct == null ? '—' : `${results.relay_cpu_pct}%`}</td>
+        <td class="${betterClass(stack, 'relay_rss_mb', false)}">${results.relay_rss_mb ?? '—'} MB</td>
+        <td class="${betterClass(stack, 'avg_latency_ms', false)}">${results.avg_latency_ms ?? '—'} ms</td>
+        <td class="${betterClass(stack, 'rss_per_session_kb', false)}">${results.rss_per_session_kb ?? '—'} KB</td>
+        <td>${commit ? `<a class="commit-link" href="${REPO_URL}/commit/${commit}">${commitLabel}</a>` : commitLabel}</td>
+      </tr>
+    `;
+  }).join('');
   container.innerHTML = `
-    <div class="stat"><div class="value">${r.throughput_mbps || '—'}</div><div class="label">Throughput (Mbps)</div></div>
-    <div class="stat"><div class="value">${r.throughput_per_core_mbps || '—'}</div><div class="label">Mbps/Core</div></div>
-    <div class="stat"><div class="value">${r.peak_subscribers || '—'}</div><div class="label">Peak Subscribers</div></div>
-    <div class="stat"><div class="value">${r.relay_cpu_pct || '—'}%</div><div class="label">CPU Usage</div></div>
-    <div class="stat"><div class="value">${r.relay_rss_mb || '—'}</div><div class="label">RSS (MB)</div></div>
-    <div class="stat"><div class="value">${r.avg_latency_ms || '—'}</div><div class="label">Avg Latency (ms)</div></div>
-    <div class="stat"><div class="value">${r.rss_per_session_kb || '—'}</div><div class="label">KB/Session</div></div>
-    <div class="stat"><div class="value"><a href="${REPO_URL}/commit/${latest.commit}" class="commit-link">${latest.commit_short || latest.commit?.slice(0,7)}</a></div><div class="label">Latest Commit</div></div>
+    <table class="stack-comparison">
+      <thead><tr><th scope="col">Stack / CC</th><th scope="col">Throughput</th><th scope="col">Mbps / core</th><th scope="col">Peak subscribers</th><th scope="col">Relay CPU</th><th scope="col">RSS</th><th scope="col">Average latency</th><th scope="col">RSS / session</th><th scope="col">Latest commit</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderOverviewSummary(branchData) {
+  const container = document.getElementById('summary');
+  container.className = 'summary overview-summary';
+  const metrics = [
+    ['throughput_per_core_mbps', 'TP/core', 'Mbps', true],
+    ['throughput_mbps', 'Throughput', 'Mbps', true],
+    ['relay_cpu_pct', 'Relay CPU', '%', false],
+  ];
+  const latestRunsByProfile = new Map(PROFILE_IDS.map(profile => [
+    profile,
+    Object.fromEntries(['mvfst', 'picoquic'].map(stack => [
+      stack,
+      branchData
+        .filter(run => getRunStack(run) === stack && getRunProfile(run) === profile)
+        .reduce((current, run) => !current || run.timestamp > current.timestamp ? run : current, null),
+    ])),
+  ]));
+  const betterClass = (stack, profile, metric, higherIsBetter) => {
+    const profileRuns = latestRunsByProfile.get(profile);
+    const value = profileRuns?.[stack]?.results?.[metric];
+    const otherStack = stack === 'mvfst' ? 'picoquic' : 'mvfst';
+    const otherValue = profileRuns?.[otherStack]?.results?.[metric];
+    return isMeaningfullyBetter(value, otherValue, higherIsBetter) ? 'better' : '';
+  };
+  const rows = ['mvfst', 'picoquic'].map(stack => {
+    const cells = PROFILE_IDS.flatMap(profile => {
+      const latest = latestRunsByProfile.get(profile)?.[stack];
+      return metrics.map(([metric, , unit, higherIsBetter]) => {
+        const value = latest?.results?.[metric];
+        const formattedValue = value == null ? '—' : unit === '%' ? `${value}%` : `${value} ${unit}`;
+        return `<td class="${betterClass(stack, profile, metric, higherIsBetter)}">${formattedValue}</td>`;
+      });
+    }).join('');
+    const latestStackRun = branchData
+      .filter(run => getRunStack(run) === stack)
+      .reduce((current, run) => !current || run.timestamp > current.timestamp ? run : current, null);
+    return `<tr class="${stack}"><th scope="row"><span class="stack-name ${stack}">${stack}</span><span class="stack-cc">CC · ${latestStackRun?.params?.cc || 'unknown'}</span></th>${cells}</tr>`;
+  }).join('');
+  container.innerHTML = `
+    <table class="overview-table">
+      <caption>Latest result per profile</caption>
+      <thead>
+        <tr><th scope="col" rowspan="2">Stack / CC</th>${PROFILE_IDS.map(profile => `<th scope="colgroup" colspan="${metrics.length}">${profile.replace('mbps', ' Mbps')}</th>`).join('')}</tr>
+        <tr>${PROFILE_IDS.map(() => metrics.map(([, label]) => `<th scope="col">${label}</th>`).join('')).join('')}</tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
   `;
 }
 
 function renderChart(canvasId, data, metric, color) {
   const ctx = document.getElementById(canvasId).getContext('2d');
+  const stackColor = STACK_COLORS[document.getElementById('stack-filter').value] || color;
 
   if (charts[canvasId]) {
     charts[canvasId].destroy();
@@ -211,8 +524,8 @@ function renderChart(canvasId, data, metric, color) {
       labels,
       datasets: [{
         data: values,
-        borderColor: color,
-        backgroundColor: color + '20',
+        borderColor: stackColor,
+        backgroundColor: stackColor + '20',
         borderWidth: 2,
         pointRadius: 3,
         pointHoverRadius: 5,
@@ -244,6 +557,8 @@ function renderChart(canvasId, data, metric, color) {
           ticks: { color: '#8b949e' },
           grid: { color: '#21262d' },
           beginAtZero: false,
+          ...(metric === 'delivery_success_pct' ? { max: 100 } : {}),
+          ...(metric === 'total_resets' ? { min: 0 } : {}),
         }
       },
       onClick: (evt, elements) => {
@@ -257,9 +572,92 @@ function renderChart(canvasId, data, metric, color) {
   });
 }
 
+function renderComparisonChart(canvasId, data, metric) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  if (charts[canvasId]) charts[canvasId].destroy();
+
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: data.map(group => group.label),
+      datasets: ['mvfst', 'picoquic'].map(stack => ({
+        label: stack,
+        data: data.map(group => group.runs[stack]?.results?.[metric] ?? null),
+        borderColor: STACK_COLORS[stack],
+        backgroundColor: STACK_COLORS[stack],
+        borderDash: stack === 'picoquic' ? [6, 4] : [],
+        pointStyle: stack === 'picoquic' ? 'triangle' : 'circle',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        fill: false,
+        spanGaps: false,
+        tension: 0.2,
+      })),
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: true,
+          position: 'bottom',
+          labels: { color: '#e6edf3', usePointStyle: true, boxWidth: 10 },
+        },
+        tooltip: {
+          callbacks: {
+            title: (items) => {
+              const group = data[items[0].dataIndex];
+              return `${group.label} (${group.timestamp?.split('T')[0] || ''})`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#8b949e', maxRotation: 45, font: { size: 10, family: 'monospace' } },
+          grid: { color: '#21262d' },
+        },
+        y: {
+          ticks: { color: '#8b949e' },
+          grid: { color: '#21262d' },
+          beginAtZero: false,
+          ...(metric === 'delivery_success_pct' ? { max: 100 } : {}),
+          ...(metric === 'total_resets' ? { min: 0 } : {}),
+        },
+      },
+      onClick: (evt, elements) => {
+        if (elements.length > 0) {
+          const group = data[elements[0].index];
+          const run = group.runs.mvfst || group.runs.picoquic;
+          if (run?.commit) window.open(`${REPO_URL}/commit/${run.commit}`, '_blank');
+        }
+      },
+    },
+  });
+}
+
 // Event listeners
 document.getElementById('branch-filter').addEventListener('change', renderDashboard);
+document.getElementById('stack-filter').addEventListener('change', renderDashboard);
+document.getElementById('profile-filter').addEventListener('change', renderDashboard);
 document.getElementById('window-filter').addEventListener('change', renderDashboard);
+document.querySelectorAll('.mode-switch button').forEach(button => {
+  button.addEventListener('click', () => {
+    viewMode = button.dataset.mode;
+    document.querySelectorAll('.mode-switch button').forEach(option => {
+      option.setAttribute('aria-pressed', String(option === button));
+    });
+    document.getElementById('profile-control').hidden = viewMode === 'overview';
+    document.getElementById('stack-control').hidden = viewMode !== 'single';
+    const unit = viewMode === 'single' ? 'runs' : 'commits';
+    document.getElementById('window-label').textContent = viewMode === 'single' ? 'Window:' : 'Commits:';
+    document.querySelectorAll('#window-filter option').forEach(option => {
+      option.textContent = `Last ${option.value} ${unit}`;
+    });
+    renderDashboard();
+  });
+});
 
 // Load on page ready
 loadData();
