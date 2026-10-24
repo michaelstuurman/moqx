@@ -163,6 +163,19 @@ message(STATUS "moxygen superbuild: Boost static libs: ${BOOST_USE_STATIC_LIBS}"
 # INSTALL_DEPS ships folly and friends into the prefix. BUILD_TESTS gates the
 # bundled GTest config that moqx's find_package(GTest) needs. BUILD_SAMPLES gives
 # the integration tests the binaries they reach through MOXYGEN_BIN_DIR.
+# PGO/LTO builds serve a moqx without tests: libraries only, plus the moqtest
+# tools for the training pass. Non-LTO links of moxygen executables from
+# profile-use fat objects fail with duplicate definitions.
+set(_build_tests ON)
+set(_build_samples ON)
+set(_build_moqtest ON)
+if(NOT MOQX_PGO STREQUAL "off" OR MOQX_LTO)
+  set(_build_tests OFF)
+  set(_build_samples OFF)
+  if(NOT MOQX_PGO STREQUAL "generate")
+    set(_build_moqtest OFF)
+  endif()
+endif()
 ExternalProject_Add(moxygen
   SOURCE_DIR    "${moxygen_SOURCE_DIR}"
   SOURCE_SUBDIR standalone
@@ -185,9 +198,9 @@ ExternalProject_Add(moxygen
     # passed explicitly or the standalone build installs into /usr/local.
     -DCMAKE_INSTALL_PREFIX=${_moxygen_install}
     -DINSTALL_DEPS=ON
-    -DBUILD_TESTS=ON
-    -DBUILD_SAMPLES=ON
-    -DBUILD_MOQTEST=ON
+    -DBUILD_TESTS=${_build_tests}
+    -DBUILD_SAMPLES=${_build_samples}
+    -DBUILD_MOQTEST=${_build_moqtest}
     # Discover tests at ctest startup instead of POST_BUILD: parallel POST_BUILD
     # discovery races on a shared JSON file under cmake 4.4.0.
     -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
