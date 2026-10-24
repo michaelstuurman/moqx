@@ -118,8 +118,8 @@ RUN install -d -m 1777 /var/log/moqx/qlog
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # ── relay-portable: a release's moqx-linux-<arch>.tar.gz, unchanged ───────
-# version-release builds this when pgo is on, so the image carries the same
-# profile-guided binary as the tarball. ADD extracts bin/ and lib/ (rpath
+# version-release builds this when optimize is on, so the image carries the
+# same optimized binary as the tarball. ADD extracts bin/ and lib/ (rpath
 # $ORIGIN/../lib) under /opt/moqx; the symlinks keep entrypoint.sh's paths.
 FROM relay-base AS relay-portable
 

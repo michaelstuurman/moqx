@@ -40,9 +40,12 @@ endif()
 set(MOQX_MOXYGEN_SOURCE_DIR "${moxygen_SOURCE_DIR}" CACHE INTERNAL
     "moxygen source the ExternalProject below last configured against")
 
+include(${_top}/cmake/PgoFlags.cmake)
+
 find_program(CCACHE_PROGRAM ccache)
 set(_launchers "")
-if(CCACHE_PROGRAM)
+# Not under PGO: a cache hit would ignore the profile.
+if(CCACHE_PROGRAM AND MOQX_PGO STREQUAL "off")
   set(_launchers
     -DCMAKE_C_COMPILER_LAUNCHER=${CCACHE_PROGRAM}
     -DCMAKE_CXX_COMPILER_LAUNCHER=${CCACHE_PROGRAM})
@@ -68,21 +71,54 @@ endif()
 set(_moxygen_install "${CMAKE_BINARY_DIR}/moxygen-install")
 message(STATUS "moxygen will install to ${_moxygen_install}")
 
-# moxygen compile/link flags: sanitizers, plus a macOS fmt workaround. Apple
-# Clang 21+ rejects fmt 10.2.1's consteval format-string check (fmtlib/fmt#4740);
-# applied on all macOS since project(NONE) leaves no compiler version to gate on.
-set(_moxygen_cxx "${_san_flags}")
+# Built the way moxygen's portable release is, for moqx's portable tarballs.
+option(MOQX_MOXYGEN_PORTABLE
+  "Build moxygen like its portable release: Release, static system libs, no libunwind" OFF)
+set(MOQX_MOXYGEN_CXX_FLAGS "" CACHE STRING
+    "Extra C and C++ compile flags for moxygen and its stack, e.g. -march")
+set(_portable_args "")
+if(MOQX_MOXYGEN_PORTABLE OR NOT MOQX_PGO STREQUAL "off" OR MOQX_LTO)
+  if(NOT MOQX_MOXYGEN_PROFILE STREQUAL "default")
+    message(FATAL_ERROR
+      "MOQX_MOXYGEN_PROFILE=${MOQX_MOXYGEN_PROFILE} does not combine with "
+      "MOQX_MOXYGEN_PORTABLE, MOQX_PGO or MOQX_LTO, which build Release")
+  endif()
+  set(_build_type Release)
+endif()
+if(MOQX_MOXYGEN_PORTABLE)
+  list(APPEND _portable_args
+    -DBUNDLE_DEPS=ON -DBUNDLE_DEPS_STATIC_SYSLIBS=ON -DBUILD_TESTING=OFF
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_DISABLE_FIND_PACKAGE_LibUnwind=TRUE)
+endif()
+
+# moxygen compile/link flags: sanitizers, extra and PGO/LTO flags, plus a macOS
+# fmt workaround. Apple Clang 21+ rejects fmt 10.2.1's consteval format-string
+# check (fmtlib/fmt#4740); applied on all macOS since project(NONE) leaves no
+# compiler version to gate on.
+set(_c ${_san_flags} ${MOQX_MOXYGEN_CXX_FLAGS} ${MOQX_OPT_COMPILE_FLAGS})
+set(_ld ${_san_flags} ${MOQX_OPT_DEPS_LINK_FLAGS})
+# As moxygen's portable lane: keeps Ubuntu's fat-LTO static system libs out of LTO.
+if(MOQX_MOXYGEN_PORTABLE AND NOT MOQX_LTO)
+  list(APPEND _c -fno-lto)
+  list(APPEND _ld -fno-lto)
+endif()
+set(_cxx ${_c})
 if(APPLE)
-  string(APPEND _moxygen_cxx " -DFMT_CONSTEVAL=")
+  list(APPEND _cxx -DFMT_CONSTEVAL=)
 endif()
+string(JOIN " " _moxygen_c ${_c})
+string(JOIN " " _moxygen_cxx ${_cxx})
+string(JOIN " " _moxygen_ld ${_ld})
 set(_moxygen_flags "")
-if(NOT _san_flags STREQUAL "")
-  list(APPEND _moxygen_flags "-DCMAKE_C_FLAGS=${_san_flags}"
-       "-DCMAKE_EXE_LINKER_FLAGS=${_san_flags}" "-DCMAKE_SHARED_LINKER_FLAGS=${_san_flags}")
+if(NOT _moxygen_c STREQUAL "")
+  list(APPEND _moxygen_flags "-DCMAKE_C_FLAGS=${_moxygen_c}")
 endif()
-string(STRIP "${_moxygen_cxx}" _moxygen_cxx)
 if(NOT _moxygen_cxx STREQUAL "")
   list(APPEND _moxygen_flags "-DCMAKE_CXX_FLAGS=${_moxygen_cxx}")
+endif()
+if(NOT _moxygen_ld STREQUAL "")
+  list(APPEND _moxygen_flags
+       "-DCMAKE_EXE_LINKER_FLAGS=${_moxygen_ld}" "-DCMAKE_SHARED_LINKER_FLAGS=${_moxygen_ld}")
 endif()
 
 # Editing a local moxygen checkout needs the build re-run on every `cmake --build`
@@ -162,6 +198,7 @@ ExternalProject_Add(moxygen
     # GTestConfig and skipping the bundled GoogleTest).
     -DCMAKE_FIND_NO_INSTALL_PREFIX=ON
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    ${_portable_args}
     ${_moxygen_flags}
     ${_launchers}
 )
