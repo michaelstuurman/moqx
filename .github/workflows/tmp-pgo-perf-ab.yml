@@ -90,8 +90,6 @@ jobs:
           if [ "${{ matrix.variant }}" = plain ]; then
             mkdir -p _out/tools
             cp .scratch/moxygen-build-release-pgo/moxygen-install/bin/{moqtest_server,moqperf_test_client} _out/tools/
-          else
-            tar czf _out/pgo-profile.tar.gz -C build pgo-profile
           fi
           _install/bin/moqx --version
           ldd _install/bin/moqx | grep 'not found' && exit 1 || true
@@ -102,6 +100,7 @@ jobs:
           mkdir -p _out
           if [ -d "$RUNNER_TEMP/pgo-train" ]; then
             tar czf _out/pgo-train-logs.tar.gz --exclude discard -C "$RUNNER_TEMP" pgo-train
+            tar czf _out/pgo-profile.tar.gz -C build pgo-profile
           fi
           {
             echo "### build (${{ matrix.variant }})"
@@ -114,7 +113,7 @@ jobs:
             du -sh build/release-pgo .scratch 2>/dev/null || true
             df -h /
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v6
         if: always()

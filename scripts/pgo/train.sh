@@ -40,13 +40,15 @@ ADMIN_PORT=19701
 ENDPOINT=/moq-relay
 GCOV_DUMP="${GCOV_DUMP:-gcov-dump}"
 
-# Columns: name, quic stack, transport, duration percent, first/other object
-# bytes, objects per group. Object sizes are the perf profiles' 1mbps and 4mbps.
+# Columns: name, quic stack, transport, duration and subscriber percent, first/
+# other object bytes, objects per group. Object sizes are the perf profiles'
+# 1mbps and 4mbps; the 4mbps runs take a quarter of the subscribers so both
+# carry ~200 Mbps, which the instrumented relay serves without timeouts.
 SCENARIOS=(
-  "mvfst-quic     mvfst     quic          100  26516   3788   60"
-  "mvfst-wt       mvfst     webtransport  50   106064  26516  60"
-  "picoquic-quic  picoquic  quic          100  26516   3788   60"
-  "picoquic-wt    picoquic  webtransport  50   106064  26516  60"
+  "mvfst-quic     mvfst     quic          100  100  26516   3788   60"
+  "mvfst-wt       mvfst     webtransport  50   25   106064  26516  60"
+  "picoquic-quic  picoquic  quic          100  100  26516   3788   60"
+  "picoquic-wt    picoquic  webtransport  50   25   106064  26516  60"
 )
 
 # One translation unit per layer whose counters prove its hot path ran.
@@ -94,8 +96,6 @@ mkdir -p "$WORK_DIR" "$PROFILE_DIR"
 find "$PROFILE_DIR" -name '*.gcda' -delete
 DISCARD="$WORK_DIR/discard"
 RELAY_URL="https://127.0.0.1:${PORT}${ENDPOINT}"
-RAMP=$(( SUBSCRIBERS / 4 ))
-(( RAMP >= 1 )) || RAMP=1
 
 # picoquic refuses an insecure listener; nothing verifies the cert.
 CERT="$WORK_DIR/cert.pem" KEY="$WORK_DIR/key.pem"
@@ -146,12 +146,15 @@ stop_relay() {
 }
 
 run_scenario() {
-  local name=$1 stack=$2 transport=$3 pct=$4 first=$5 other=$6 per_group=$7
-  local dur=$(( DURATION * pct / 100 ))
+  local name=$1 stack=$2 transport=$3 dur_pct=$4 subs_pct=$5 first=$6 other=$7 per_group=$8
+  local dur=$(( DURATION * dur_pct / 100 )) subs=$(( SUBSCRIBERS * subs_pct / 100 ))
   (( dur >= 10 )) || dur=10
+  (( subs >= 1 )) || subs=1
+  local ramp=$(( subs / 4 ))
+  (( ramp >= 1 )) || ramp=1
   local dir="$WORK_DIR/$name"
   mkdir -p "$dir"
-  log "scenario $name: $stack/$transport subscribers=$SUBSCRIBERS ramp=$RAMP/s duration=${dur}s objects=${first}/${other} x ${per_group}"
+  log "scenario $name: $stack/$transport subscribers=$subs ramp=$ramp/s duration=${dur}s objects=${first}/${other} x ${per_group}"
 
   local cc=bbr2 tls=(--insecure) tflag=--transport=quic
   [[ "$stack" == picoquic ]] && cc=bbr tls=(--cert "$CERT" --key "$KEY")
@@ -176,7 +179,7 @@ run_scenario() {
   local client_rc=0
   GCOV_PREFIX="$DISCARD" timeout $(( dur + 60 )) "$MOQBIN/moqperf_test_client" \
     --relay_url="$RELAY_URL" "$tflag" \
-    --subscriber_max="$SUBSCRIBERS" --subscriber_ramp="$RAMP" \
+    --subscriber_max="$subs" --subscriber_ramp="$ramp" \
     --duration="$dur" --delivery_timeout=5000 --num_threads="$CLIENT_THREADS" \
     --first_object_size="$first" --other_object_size="$other" \
     --objects_per_group="$per_group" \
@@ -206,13 +209,15 @@ done
 count=$(find "$PROFILE_DIR" -name '*.gcda' | wc -l)
 (( count > 0 )) || die "no .gcda files under $PROFILE_DIR"
 for obj in "${HOT_OBJECTS[@]}"; do
-  hit=""
+  hit=0
   while IFS= read -r f; do
-    if "$GCOV_DUMP" -l "$f" 2>/dev/null | grep -E 'COUNTERS arcs [0-9]+ counts' | grep -qv 'all zero'; then
+    # grep -c reads to the end: an early-exiting grep -q fails the pipe under pipefail.
+    n=$("$GCOV_DUMP" -l "$f" 2>/dev/null | grep -E 'COUNTERS arcs [0-9]+ counts' | grep -vc 'all zero' || true)
+    if (( n > 0 )); then
       hit=1
       break
     fi
   done < <(find "$PROFILE_DIR" -name "*#${obj}.gcda")
-  [[ -n "$hit" ]] || die "no non-zero counters for $obj under $PROFILE_DIR"
+  (( hit )) || die "no non-zero counters for $obj under $PROFILE_DIR"
 done
 log "profile: $count .gcda files, $(du -sh "$PROFILE_DIR" | cut -f1), counters in ${HOT_OBJECTS[*]}"
