@@ -208,6 +208,8 @@ jobs:
           MOQBIN_ARG=()
           RUN_ID="$COMMIT_SHORT"
           if [[ -n "$RELEASE" ]]; then
+            # The tag becomes part of the result file names.
+            [[ "$RELEASE" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "ERROR: invalid release tag: $RELEASE" >&2; exit 1; }
             rm -rf _release
             gh release download "$RELEASE" --pattern moqx-linux-amd64.tar.gz --dir _release
             mkdir -p _release/moqx

@@ -563,6 +563,13 @@ target_link_libraries(moqx-issuer PRIVATE moqx_warnings)
 # --- Tests ---
 
 if(MOQX_BUILD_TESTS)
+  # A PGO/LTO superbuild leaves out moxygen's tests and the GTest config they install.
+  find_package(GTest QUIET CONFIG)
+  if(NOT GTest_FOUND AND (NOT MOQX_PGO STREQUAL "off" OR MOQX_LTO))
+    message(FATAL_ERROR
+      "MOQX_BUILD_TESTS needs GTest, which a PGO/LTO moxygen build does not install; "
+      "pass -DMOQX_BUILD_TESTS=OFF")
+  endif()
   enable_testing()
   add_subdirectory(test)
 endif()

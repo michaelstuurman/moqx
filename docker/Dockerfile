@@ -125,7 +125,8 @@ FROM relay-base AS relay-portable
 
 ARG MOQX_PORTABLE_TARBALL
 ADD ${MOQX_PORTABLE_TARBALL} /opt/moqx/
-RUN ln -s /opt/moqx/bin/moqx /usr/local/bin/moqx \
+RUN test -x /opt/moqx/bin/moqx && test -x /opt/moqx/bin/moqx-issuer \
+    && ln -s /opt/moqx/bin/moqx /usr/local/bin/moqx \
     && ln -s /opt/moqx/bin/moqx-issuer /usr/local/bin/moqx-issuer
 
 # ── relay: the published moqx image. Last, so it is the default target. ──
