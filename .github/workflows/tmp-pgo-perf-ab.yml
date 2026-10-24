@@ -5,13 +5,14 @@ name: tmp optimized perf ab
 # plus LTO), with version-release's portable flags, then A/Bs the two relays on
 # the perf VMs: local forwarders on, 4 IO threads, mvfst and picoquic, runs
 # alternating. The load generators come from the plain build for both. Triggers
-# only when this file changes; the perf job shares the VMs with the nightly
+# when this file changes, or by dispatch; the perf job shares the VMs with the nightly
 # through the perf-test concurrency group.
 
 on:
   push:
     branches: [ci/pgo-release-consumers]
     paths: ['.github/workflows/tmp-pgo-perf-ab.yml']
+  workflow_dispatch:
 
 permissions:
   contents: read
