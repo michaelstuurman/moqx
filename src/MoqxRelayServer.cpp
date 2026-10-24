@@ -5,6 +5,7 @@
  */
 
 #include "MoqxRelayServer.h"
+#include "logging/CaptureQLogger.h"
 #include "stats/EventBaseStatsCollector.h"
 #include "stats/QuicStatsCollector.h"
 #include <moxygen/MoQRelaySession.h>
@@ -133,6 +134,9 @@ quic::TransportSettings
 buildTransportSettings(const config::QuicConfig& quic, const config::MvfstConfig& mvfst) {
   // Start with MoQServer's optimized defaults, then apply config overrides.
   quic::TransportSettings ts;
+  // WebTransport over HTTP/3 draft-16 section 3.1 requires reset_stream_at.
+  // Advertising support is safe for native MoQT peers that do not enable it.
+  ts.advertisedReliableResetStreamSupport = true;
   ts.defaultCongestionController = quic::CongestionControlType::Copa;
   ts.pacingEnabled = mvfst.pacingEnabled;
   ts.maxCwndInMss = mvfst.maxCwndInMss;
@@ -222,7 +226,9 @@ MoqxRelayServer::MoqxRelayServer(
       listenerCfg_(listenerCfg), context_(std::move(context)), ioExecutor_(ioExecutor) {
   // Advertise on every listener: activation is bilateral and loop protection
   // must not vary by listener configuration.
-  addSetupParameter(SetupParameter(folly::to_underlying(SetupKey::RELAY_HOPS), std::string{}));
+  addSetupParameter(
+      SetupParameter(folly::to_underlying(SetupKey::HOP_ID), context_->getRelayHopID())
+  );
 }
 
 MoqxRelayServer::~MoqxRelayServer() {
@@ -299,6 +305,14 @@ std::shared_ptr<MoQSession> MoqxRelayServer::createSession(
 std::shared_ptr<quic::QLogger> MoqxRelayServer::makeQLogger(quic::VantagePoint vantagePoint) {
   if (qlogDir_.empty()) {
     return nullptr;
+  }
+  if (qlogCapture_) {
+    if (auto mode = qlogCapture_->take()) {
+      if (*mode == logging::QLogCapture::Mode::Cc) {
+        return std::make_shared<logging::CcQLogger>(vantagePoint, qlogDir_);
+      }
+      return std::make_shared<logging::CaptureQLogger>(vantagePoint, qlogDir_, *mode);
+    }
   }
   if (qlogSampleRate_ <= 0.0f) {
     return nullptr;

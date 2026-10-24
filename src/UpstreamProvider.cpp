@@ -18,9 +18,9 @@ namespace openmoq::moqx {
 // Must fit in a QUIC variable-length integer (top 2 bits must be 00, i.e. < 2^62).
 static constexpr uint64_t kRelayAuthTokenType = 0x1B2C'3D4E'5F6A'7B8CULL;
 
-std::optional<std::string> getPeerRelayID(const SubscribeNamespace& subNs) {
+std::optional<std::string> getPeerRelayID(const TrackRequestParameters& params) {
   const uint64_t authKey = static_cast<uint64_t>(TrackRequestParamKey::AUTHORIZATION_TOKEN);
-  for (const auto& param : subNs.params) {
+  for (const auto& param : params) {
     if (param.key == authKey && param.asAuthToken.tokenType == kRelayAuthTokenType) {
       return param.asAuthToken.tokenValue;
     }
@@ -28,22 +28,40 @@ std::optional<std::string> getPeerRelayID(const SubscribeNamespace& subNs) {
   return std::nullopt;
 }
 
+std::optional<std::string> getPeerRelayID(const SubscribeNamespace& subNs) {
+  return getPeerRelayID(subNs.params);
+}
+
+namespace {
+void addRelayToken(TrackRequestParameters& params, const std::string& relayID) {
+  params.insertParam(Parameter(
+      static_cast<uint64_t>(TrackRequestParamKey::AUTHORIZATION_TOKEN),
+      AuthToken{
+          .tokenType = kRelayAuthTokenType,
+          .tokenValue = relayID,
+          .alias = AuthToken::DontRegister,
+      }
+  ));
+}
+} // namespace
+
 SubscribeNamespace makePeerSubNs(std::optional<std::string> relayID) {
   SubscribeNamespace subNs;
   subNs.trackNamespacePrefix = {};
   subNs.options = SubscribeNamespaceOptions::BOTH;
   subNs.forward = false;
   if (relayID) {
-    subNs.params.insertParam(Parameter(
-        static_cast<uint64_t>(TrackRequestParamKey::AUTHORIZATION_TOKEN),
-        AuthToken{
-            .tokenType = kRelayAuthTokenType,
-            .tokenValue = *relayID,
-            .alias = AuthToken::DontRegister,
-        }
-    ));
+    addRelayToken(subNs.params, *relayID);
   }
   return subNs;
+}
+
+SubscribeTracks makePeerSubTracks(const std::string& relayID) {
+  SubscribeTracks subTracks;
+  subTracks.trackNamespacePrefix = {};
+  subTracks.forward = false;
+  addRelayToken(subTracks.params, relayID);
+  return subTracks;
 }
 
 namespace {
@@ -54,23 +72,6 @@ namespace {
 class PendingTrackConsumer : public TrackConsumerFilter {
 public:
   PendingTrackConsumer() : TrackConsumerFilter(nullptr) {}
-};
-
-// Presents an upstream SUBSCRIBE_NAMESPACE(options=PUBLISH) handle as a
-// SubscribeTracksHandle, since subscribeTracks() maps onto subscribeNamespace().
-class UpstreamSubscribeTracksHandle : public Publisher::SubscribeTracksHandle {
-public:
-  explicit UpstreamSubscribeTracksHandle(std::shared_ptr<Publisher::SubscribeNamespaceHandle> inner)
-      : Publisher::SubscribeTracksHandle(inner->subscribeNamespaceOk()), inner_(std::move(inner)) {}
-
-  void unsubscribeTracks() override { inner_->unsubscribeNamespace(); }
-
-  folly::coro::Task<RequestUpdateResult> requestUpdate(RequestUpdate update) override {
-    return inner_->requestUpdate(std::move(update));
-  }
-
-private:
-  std::shared_ptr<Publisher::SubscribeNamespaceHandle> inner_;
 };
 
 } // namespace
@@ -84,18 +85,19 @@ UpstreamProvider::UpstreamProvider(
     OnConnectHook onConnect,
     OnDisconnectHook onDisconnect,
     std::chrono::milliseconds connectTimeout,
-    std::chrono::milliseconds idleTimeout
+    std::chrono::milliseconds idleTimeout,
+    std::optional<uint64_t> hopID
 )
     : publishHandler_(std::move(publishHandler)), subscribeHandler_(std::move(subscribeHandler)),
       url_(std::move(url)), exec_(std::move(exec)), verifier_(std::move(verifier)),
       onConnect_(std::move(onConnect)), onDisconnect_(std::move(onDisconnect)),
-      connectTimeout_(connectTimeout), idleTimeout_(idleTimeout) {
+      connectTimeout_(connectTimeout), idleTimeout_(idleTimeout), hopID_(hopID) {
   XLOG(DBG1) << "UpstreamProvider created, url=" << url_.getUrl();
 }
 
 UpstreamProvider::~UpstreamProvider() {
-  // close() holds shared_from_this() and runs during MoQServer::stop() EVB
-  // drain — both before member dtors fire. These must be null by now.
+  // stop() holds shared_from_this() until stopOnOwner() runs during the
+  // MoQServer::stop() EVB drain, before member dtors fire. These must be null by now.
   XCHECK(!session_) << "UpstreamProvider dtor with live session; was stop() called?";
   XCHECK(!client_) << "UpstreamProvider dtor with live client; was stop() called?";
   XLOG(DBG1) << "UpstreamProvider destroyed";
@@ -146,17 +148,22 @@ folly::coro::Task<void> UpstreamProvider::reconnectLoop() {
   }
 }
 
-folly::coro::Task<void> UpstreamProvider::close() {
-  auto self = shared_from_this();
+void UpstreamProvider::close() {
   XLOG(DBG1) << "UpstreamProvider::close";
   session_.reset();
   client_.reset(); // ~MoQClientBase() calls moqSession_->close() implicitly
   state_ = State::Disconnected;
-  co_return;
 }
 
 void UpstreamProvider::stop() {
   XLOG(DBG1) << "UpstreamProvider::stop";
+  exec_->add([self = shared_from_this()] { self->stopOnOwner(); });
+}
+
+void UpstreamProvider::stopOnOwner() {
+  if (stopped_) {
+    return;
+  }
   stopped_ = true;
 
   // Cancel any in-progress backoff sleep or connect in reconnectLoop().
@@ -169,9 +176,7 @@ void UpstreamProvider::stop() {
   onConnect_ = nullptr;
   onDisconnect_ = nullptr;
 
-  // Close the upstream session on the exec EVB thread while EVBs are still
-  // alive.
-  co_withExecutor(exec_.get(), close()).start();
+  close();
 }
 
 // --- Publisher interface ---
@@ -240,23 +245,11 @@ folly::coro::Task<Publisher::SubscribeNamespaceResult> UpstreamProvider::coSubsc
 
 folly::coro::Task<Publisher::SubscribeTracksResult> UpstreamProvider::subscribeTracks(
     SubscribeTracks subTracks,
-    std::shared_ptr<PublishBlockedHandle> /*publishBlockedHandle*/
+    std::shared_ptr<PublishBlockedHandle> publishBlockedHandle
 ) {
   XLOG(DBG1) << "UpstreamProvider::subscribeTracks nsp=" << subTracks.trackNamespacePrefix;
-  // SUBSCRIBE_TRACKS == SUBSCRIBE_NAMESPACE with options=PUBLISH: both request
-  // PUBLISH for matching tracks under a prefix and want no NAMESPACE messages,
-  // so there is no namespace handle to forward.
-  SubscribeNamespace subNs;
-  subNs.requestID = subTracks.requestID;
-  subNs.trackNamespacePrefix = subTracks.trackNamespacePrefix;
-  subNs.forward = subTracks.forward;
-  subNs.params = std::move(subTracks.params);
-  subNs.options = SubscribeNamespaceOptions::PUBLISH;
-  auto result = co_await subscribeNamespace(std::move(subNs), /*handle=*/nullptr);
-  if (result.hasError()) {
-    co_return folly::makeUnexpected(std::move(result.error()));
-  }
-  co_return std::make_shared<UpstreamSubscribeTracksHandle>(std::move(result.value()));
+  auto sess = co_await getOrConnectSession();
+  co_return co_await sess->subscribeTracks(std::move(subTracks), std::move(publishBlockedHandle));
 }
 
 // --- Subscriber interface ---
@@ -407,11 +400,10 @@ folly::coro::Task<void> UpstreamProvider::doConnect() {
       MoQRelaySession::createRelaySessionFactory(),
       verifier_
   );
-  // Advertise on every upstream session. The extension stays inactive unless
-  // the peer also advertises it.
-  client_->addSetupParameter(
-      SetupParameter(folly::to_underlying(SetupKey::RELAY_HOPS), std::string{})
-  );
+  // The extension stays inactive unless the peer also declares a Hop ID.
+  if (hopID_) {
+    client_->addSetupParameter(SetupParameter(folly::to_underlying(SetupKey::HOP_ID), *hopID_));
+  }
 
   quic::TransportSettings ts;
   ts.orderedReadCallbacks = true;
@@ -420,15 +412,14 @@ folly::coro::Task<void> UpstreamProvider::doConnect() {
   ts.datagramConfig.writeBufSize = 1000;
   ts.datagramConfig.sendDropOldDataFirst = true;
 
-  // Relay chaining requires draft 16+. Only offer standard draft-16 ALPN
-  // ("moqt-16") so we fail fast if the upstream doesn't support it.
+  // Relay links use draft 18 only.
   co_await client_->setupMoQSession(
       connectTimeout_,
       idleTimeout_,
       publishHandler_,
       subscribeHandler_,
       ts,
-      getMoqtProtocols("16", /*useStandard=*/true)
+      getMoqtProtocols("18", /*useStandard=*/true)
   );
 
   session_ = client_->moqSession_;
@@ -437,21 +428,38 @@ folly::coro::Task<void> UpstreamProvider::doConnect() {
   // Register for close notifications
   session_->setSessionCloseCallback(this);
 
-  if (onConnect_) {
-    co_await onConnect_(session_);
+  // stop() can clear onConnect_ while the hook's coroutine still runs in its closure.
+  if (auto onConnect = onConnect_) {
+    co_await onConnect(session_);
+  }
+  if (stopped_) {
+    co_yield folly::coro::co_error(std::runtime_error("UpstreamProvider stopped"));
   }
 
   XLOG(DBG1) << "UpstreamProvider::doConnect completed, session=" << session_.get();
 }
 
-folly::coro::Task<void> UpstreamProvider::waitForConnected(std::chrono::milliseconds timeout) {
-  if (stopped_ || (state_ == State::Connected && session_)) {
+folly::coro::TaskWithExecutor<void>
+UpstreamProvider::waitForConnected(std::chrono::milliseconds timeout) {
+  return folly::coro::co_withExecutor(
+      folly::getKeepAliveToken(exec_.get()),
+      waitForConnectedOnOwner(shared_from_this(), timeout)
+  );
+}
+
+folly::coro::Task<void> UpstreamProvider::waitForConnectedOnOwner(
+    std::shared_ptr<UpstreamProvider> self,
+    std::chrono::milliseconds timeout
+) {
+  if (self->stopped_ || (self->state_ == State::Connected && self->session_)) {
     co_return;
   }
-  if (!connectPromise_) {
+  if (!self->connectPromise_) {
     co_return;
   }
-  co_await folly::coro::co_awaitTry(folly::coro::timeout(connectPromise_->getFuture(), timeout));
+  co_await folly::coro::co_awaitTry(
+      folly::coro::timeout(self->connectPromise_->getFuture(), timeout)
+  );
 }
 
 void UpstreamProvider::resetSession() {

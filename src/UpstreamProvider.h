@@ -31,11 +31,15 @@ namespace openmoq::moqx {
 // the token (may be empty string if the peer didn't include one).
 // Returns std::nullopt if subNs is not a peer subNs at all.
 std::optional<std::string> getPeerRelayID(const moxygen::SubscribeNamespace& subNs);
+std::optional<std::string> getPeerRelayID(const moxygen::TrackRequestParameters& params);
 
 // Builds a wildcard SubscribeNamespace(prefix={}, BOTH).
 // With relayID: includes the relay auth token (initiating peer).
 // Without relayID: no token (reciprocal response — prevents loops).
 moxygen::SubscribeNamespace makePeerSubNs(std::optional<std::string> relayID = std::nullopt);
+
+// Draft 18 moved pushed tracks out of SUBSCRIBE_NAMESPACE, so relay peering sends this too.
+moxygen::SubscribeTracks makePeerSubTracks(const std::string& relayID);
 
 /**
  * UpstreamProvider connects to a remote MoQ endpoint as a client and presents
@@ -44,6 +48,9 @@ moxygen::SubscribeNamespace makePeerSubNs(std::optional<std::string> relayID = s
  * the relay peering handshake. On disconnect it proactively reconnects
  * immediately, then backs off exponentially (1s → 60s cap) on repeated
  * failures.
+ *
+ * All state lives on exec_. Only stop() and waitForConnected() may be called
+ * from another thread.
  */
 class UpstreamProvider : public moxygen::Publisher,
                          public moxygen::Subscriber,
@@ -63,7 +70,8 @@ public:
       OnConnectHook onConnect = nullptr,
       OnDisconnectHook onDisconnect = nullptr,
       std::chrono::milliseconds connectTimeout = std::chrono::milliseconds(5000),
-      std::chrono::milliseconds idleTimeout = std::chrono::milliseconds(5000)
+      std::chrono::milliseconds idleTimeout = std::chrono::milliseconds(5000),
+      std::optional<uint64_t> hopID = std::nullopt
   );
 
   ~UpstreamProvider() override;
@@ -71,14 +79,15 @@ public:
   // Initiates the first connection to the upstream server.
   folly::coro::Task<void> start();
 
-  // Gracefully shuts down, closes the session, cancels reconnection.
+  // Gracefully shuts down, closes the session, cancels reconnection. Takes
+  // effect when exec_ runs it.
   void stop();
 
   // Suspends until the upstream session is Connected (i.e., QUIC session
   // established + peering handshake completed), or the timeout elapses.
   // Returns immediately if already connected, stopped, or no connection is
   // in progress.  Swallows connection errors — caller must re-check state.
-  folly::coro::Task<void> waitForConnected(std::chrono::milliseconds timeout);
+  folly::coro::TaskWithExecutor<void> waitForConnected(std::chrono::milliseconds timeout);
 
   // --- Publisher interface (forwarded to upstream session) ---
 
@@ -151,7 +160,13 @@ private:
 
   // Resets session_ and client_ on the exec thread (while EVBs are alive),
   // allowing ~MoQClientBase() to call moqSession_->close() on a live EVB.
-  folly::coro::Task<void> close();
+  void close();
+
+  void stopOnOwner();
+  static folly::coro::Task<void> waitForConnectedOnOwner(
+      std::shared_ptr<UpstreamProvider> self,
+      std::chrono::milliseconds timeout
+  );
 
   // Ensures a session exists, connecting if needed. Called by slow-path
   // coroutines when getSession() returns null.
@@ -198,6 +213,9 @@ private:
   OnDisconnectHook onDisconnect_;
   std::chrono::milliseconds connectTimeout_;
   std::chrono::milliseconds idleTimeout_;
+  // Unset leaves MoQ Cluster off on this link, for a peer that lacks it or
+  // implements it incompatibly. Loop detection then does not cross the link.
+  std::optional<uint64_t> hopID_;
   bool stopped_{false};
 
   // Connection gating: when Connecting, operations co_await this

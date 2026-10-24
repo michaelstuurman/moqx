@@ -38,9 +38,6 @@
 
 namespace openmoq::moqx {
 
-// Draft 16 encodes Hop IDs as QUIC variable-length integers.
-inline constexpr uint64_t kMaxRelayHopID = (uint64_t{1} << 62) - 1;
-
 uint64_t generateRelayHopID();
 
 class CrossExecFilter;
@@ -140,7 +137,6 @@ public:
         ownedRelayExec_(std::move(relayExec)), relayExec_(ownedRelayExec_.get()),
         useLocalForwarders_(useLocalForwarders), maxDeselected_(maxDeselected),
         idleTimeout_(idleTimeout), activityThreshold_(activityThreshold) {
-    XCHECK_LE(relayHopID_, kMaxRelayHopID);
     // Park timers fire on the relay's own EventBase instead of folly's global
     // timekeeper thread. Null (SingleThread mode, or a non-folly exec) falls back to it.
     if (auto* follyExec = dynamic_cast<moxygen::MoQFollyExecutorImpl*>(relayExec_)) {
@@ -222,7 +218,7 @@ public:
   void onUpstreamDisconnect();
 
   // Releases per-session relay state; the servers call this as a session tears down.
-  void onSessionEnd(std::shared_ptr<moxygen::MoQSession> session);
+  void onSessionEnd(std::shared_ptr<moxygen::MoQSession> /*session*/) {}
 
   folly::coro::Task<SubscribeResult> subscribe(
       moxygen::SubscribeRequest subReq,
@@ -474,36 +470,41 @@ private:
   moxygen::TrackNamespace allowedNamespacePrefix_;
   // Operational identity used by relay authentication and upstream routing.
   std::string relayID_;
-  // Opaque random protocol identity required by draft-lcurley-moq-relay-hops.
+  // Opaque random protocol identity required by draft-lcurley-moq-cluster-01.
   uint64_t relayHopID_;
   std::shared_ptr<UpstreamProvider> upstream_;
 
   // Holds the peer subNs handle for the upstream (initiating) direction.
   // Kept alive so the subscription is not cancelled when onUpstreamConnect returns.
   std::shared_ptr<moxygen::Publisher::SubscribeNamespaceHandle> upstreamSubNsHandle_;
+  std::shared_ptr<moxygen::Publisher::SubscribeTracksHandle> upstreamTracksHandle_;
 
   struct PeerInfo {
     std::shared_ptr<moxygen::Publisher::SubscribeNamespaceHandle> handle;
+    std::shared_ptr<moxygen::Publisher::SubscribeTracksHandle> tracksHandle; // draft 18+
     std::string relayID; // from peer auth token; empty if not provided
+    std::string address;
+    std::string authority;
   };
   // Reciprocal peer subNs handles: one per peer relay session that has
   // connected to us. Kept alive so the subscription is not immediately
-  // cancelled. Keyed by raw session pointer (valid for session lifetime).
-  folly::F14FastMap<moxygen::MoQSession*, PeerInfo> peerSubNsHandles_;
+  // cancelled.
+  folly::F14FastMap<moxygen::SessionId, PeerInfo, moxygen::SessionId::hash> peerSubNsHandles_;
+  // Also true for a reconnecting peer's earlier session, which may still hold its pushed tracks.
+  bool isPeerSession(const std::shared_ptr<moxygen::MoQSession>& session, const std::string& peerID)
+      const;
 
-  struct LegacyPublisherHopID {
-    std::weak_ptr<moxygen::MoQSession> session;
-    uint64_t hopID;
-  };
-  folly::F14FastMap<const moxygen::MoQSession*, LegacyPublisherHopID> legacyPublisherHopIDs_;
   SubscriptionRegistry registry_;
 
-  std::optional<std::vector<uint64_t>> ingestRelayHopPath(
+  struct IngestedRoute {
+    std::vector<uint64_t> path;
+    uint64_t cost; // ROUTE_COST plus the sender's link cost
+  };
+  // Returns nullopt to drop the advertisement. A malformed path also closes the session.
+  std::optional<IngestedRoute> ingestRoute(
       const moxygen::PublishNamespace& pubNs,
       const std::shared_ptr<moxygen::MoQSession>& session
   );
-
-  uint64_t getOrCreateLegacyPublisherHopID(const std::shared_ptr<moxygen::MoQSession>& session);
 
   // Result of joinOrPrepareUpstreamSubscription (runs on relayExec_).
   struct StatefulSubscribeResult {
@@ -606,7 +607,7 @@ private:
   // Must be scheduled on the publisher exec; looks the forwarder up in tlForwarders_ by FTN.
   // nullopt means no active sub, defer upstream.
   folly::coro::Task<std::optional<moxygen::TrackStatusOk>>
-  readPublisherForwarderStatus(bool hasHandle, moxygen::TrackStatus req);
+  readPublisherForwarderStatus(moxygen::TrackStatus req);
   folly::coro::Task<void> onUpstreamConnectImpl(std::shared_ptr<moxygen::MoQSession> session);
 
   // Synchronous result of publishWithSession: the consumer the publisher writes

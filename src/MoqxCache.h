@@ -139,7 +139,12 @@ public:
     return maxAllowedCacheDuration_;
   }
 
-  void setTrackExtensions(const moxygen::FullTrackName& ftn, moxygen::Extensions extensions);
+  // Takes Largest from SUBSCRIBE_OK so a cached track does not keep a stale one.
+  void setTrackState(
+      const moxygen::FullTrackName& ftn,
+      std::optional<moxygen::AbsoluteLocation> largest,
+      moxygen::Extensions extensions
+  );
 
   TimePoint now() const { return clock_(); }
 
@@ -317,6 +322,13 @@ private:
     // Returns true if track can be evicted (not live, no active fetches)
     bool canEvict() const { return liveWritebackCount == 0 && fetchesInProgress.empty(); }
 
+    // Returns true if this is the newest group of a live track, where a late
+    // subscriber's Joining FETCH lands. Byte-pressure eviction skips it.
+    bool isJoinPoint(uint64_t groupID) const {
+      return liveWritebackCount > 0 && largestGroupAndObject &&
+             largestGroupAndObject->group == groupID;
+    }
+
     // Returns true if objects should be forwarded without caching.
     // Optimistic: nullopt maxCacheDuration means "unknown, cache it".
     bool shouldSkipCaching() const {
@@ -447,6 +459,8 @@ private:
   // defaultMaxCacheDuration_, or nullopt if neither is set.
   std::optional<std::chrono::milliseconds>
   getEffectiveCacheDuration(const moxygen::Extensions& extensions) const;
+
+  CacheTrack& getOrCreateTrack(const moxygen::FullTrackName& ftn);
 
   // Track LRU management helpers
   void addTrackToLRU(const moxygen::FullTrackName& ftn, CacheTrack& track);

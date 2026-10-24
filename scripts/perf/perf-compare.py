@@ -38,8 +38,20 @@ def load_results_file(path: Path) -> dict:
         return json.load(f)
 
 
-def load_baseline_data(data_dir: Path, branch: str, window: int) -> list[dict]:
-    """Load the most recent N results from the data directory for a given branch."""
+def run_stack(run: dict) -> str:
+    """Return the run's stack, treating historical results as mvfst."""
+    return (run.get("params") or {}).get("quic_stack") or "mvfst"
+
+
+def run_profile(run: dict) -> str:
+    """Return the run's profile, treating historical results as 1mbps."""
+    return (run.get("params") or {}).get("profile") or "1mbps"
+
+
+def load_baseline_data(
+    data_dir: Path, branch: str, stack: str, profile: str, window: int
+) -> list[dict]:
+    """Load the most recent N results for a branch, stack, and profile."""
     results = []
     index_path = data_dir / "index.json"
 
@@ -47,8 +59,14 @@ def load_baseline_data(data_dir: Path, branch: str, window: int) -> list[dict]:
         with open(index_path) as f:
             index = json.load(f)
 
-        # Filter to same branch (typically 'main')
-        entries = [e for e in index.get("runs", []) if e.get("branch") == branch]
+        # Missing stack/profile metadata identifies legacy mvfst/1mbps runs.
+        entries = [
+            e
+            for e in index.get("runs", [])
+            if e.get("branch") == branch
+            and (e.get("quic_stack") or "mvfst") == stack
+            and (e.get("profile") or "1mbps") == profile
+        ]
         # Sort by timestamp descending
         entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
         # Take most recent N
@@ -69,7 +87,11 @@ def load_baseline_data(data_dir: Path, branch: str, window: int) -> list[dict]:
                 continue
             try:
                 data = load_results_file(jf)
-                if data.get("branch") == branch:
+                if (
+                    data.get("branch") == branch
+                    and run_stack(data) == stack
+                    and run_profile(data) == profile
+                ):
                     results.append(data)
             except (json.JSONDecodeError, KeyError):
                 continue
@@ -183,6 +205,8 @@ def generate_markdown(
     lines = []
 
     commit_short = current.get("commit_short", current.get("commit", "")[:7])
+    stack = run_stack(current)
+    profile = run_profile(current)
 
     has_regressions = any(c["status"] == "regression" for c in comparisons)
     has_baseline = baseline_count > 0
@@ -196,10 +220,12 @@ def generate_markdown(
 
     if has_baseline:
         lines.append(
-            f"Comparing `{commit_short}` against rolling {baseline_count}-run average on `main`."
+            f"Comparing `{commit_short}` ({profile}, {stack}) against rolling {baseline_count}-run average on `main` for the same profile and stack."
         )
     else:
-        lines.append(f"Results for `{commit_short}` (no baseline data available yet).")
+        lines.append(
+            f"Results for `{commit_short}` ({profile}, {stack}; no matching baseline data available yet)."
+        )
 
     lines.append("")
 
@@ -229,6 +255,11 @@ def generate_markdown(
     lines.append("<details><summary>Test parameters & full results</summary>")
     lines.append("")
     lines.append(f"- **Result:** {test_result}")
+    lines.append(f"- **Stack:** {stack}")
+    lines.append(f"- **Profile:** {profile}")
+    lines.append(f"- **Congestion control:** {params.get('cc', '?')}")
+    if params.get("target_cpu_pct"):
+        lines.append(f"- **CPU calibration target:** {params['target_cpu_pct']}%")
     lines.append(
         f"- **Subscribers:** {params.get('subscriber_max', '?')} (ramp {params.get('ramp', '?')}/s)"
     )
@@ -285,7 +316,11 @@ def main():
     # Load baseline
     data_dir = Path(args.data_dir)
     baseline_branch = "main"  # Always compare against main
-    historical = load_baseline_data(data_dir, baseline_branch, args.window)
+    stack = run_stack(current)
+    profile = run_profile(current)
+    historical = load_baseline_data(
+        data_dir, baseline_branch, stack, profile, args.window
+    )
     baseline = compute_baseline(historical)
 
     # Compare
@@ -305,6 +340,8 @@ def main():
         comparison_data = {
             "commit": current.get("commit"),
             "timestamp": current.get("timestamp"),
+            "quic_stack": stack,
+            "profile": profile,
             "has_regressions": any(c["status"] == "regression" for c in comparisons),
             "baseline_count": len(historical),
             "comparisons": comparisons,

@@ -125,7 +125,7 @@ curl -sf "http://127.0.0.1:${ADMIN_PORT}/config" | python3 -c '
 import json, os, sys
 cfg = json.load(sys.stdin)
 want = {
-    "mvfst": (os.environ.get("MOQX_CC") or "bbr",
+    "mvfst": (os.environ.get("MOQX_CC") or "bbr2",
               (os.environ.get("MOQX_BBR_SKIP_PROBE_RTT") or "true") == "true"),
     "picoquic": (os.environ.get("MOQX_PICO_CC") or "bbr", None),
 }

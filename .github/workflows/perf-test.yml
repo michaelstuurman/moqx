@@ -23,7 +23,7 @@ name: perf test
 #
 # Publishing
 # ----------
-# Results stage as a Pages artifact (180-run rolling window + dashboard) and
+# Results stage as a Pages artifact (1080-run rolling window + dashboard) and
 # only deploy on the nightly schedule. Manual / called runs upload the
 # artifact for inspection but do not publish — keeps experiments from
 # clobbering the main trend line at openmoq.org/moqx/.
@@ -44,9 +44,38 @@ on:
         type: number
         default: 120
       subscribers:
-        description: 'peak subscribers'
+        description: 'subscriber override; 0 derives count from CPU target and profile'
         type: number
-        default: 600
+        default: 0
+      target_cpu_pct:
+        description: 'CPU calibration target; 300% is 75% of four cores (shared counts for both stacks)'
+        type: number
+        default: 300
+      profile:
+        description: 'workload profile(s) to test'
+        type: choice
+        options:
+          - all
+          - 1mbps
+          - 4mbps
+          - 16mbps
+        default: all
+      quic_stack:
+        description: 'QUIC stack(s) to test'
+        type: choice
+        options:
+          - both
+          - mvfst
+          - picoquic
+        default: both
+      mvfst_cc:
+        description: 'mvfst congestion control override (native preserves bbr2)'
+        type: choice
+        options:
+          - native
+          - bbr
+          - bbr2
+        default: native
       compare:
         description: 'compare against the published nightly baseline and render a report'
         type: boolean
@@ -73,7 +102,23 @@ on:
       subscribers:
         type: number
         required: false
-        default: 600
+        default: 0
+      target_cpu_pct:
+        type: number
+        required: false
+        default: 300
+      profile:
+        type: string
+        required: false
+        default: all
+      quic_stack:
+        type: string
+        required: false
+        default: both
+      mvfst_cc:
+        type: string
+        required: false
+        default: native
       compare:
         type: boolean
         required: false
@@ -98,13 +143,13 @@ jobs:
     # Headroom for the from-source moxygen fallback on top of the perf runs.
     timeout-minutes: 240
     outputs:
-      run-file: ${{ steps.collect.outputs.run-file }}
+      run-files: ${{ steps.collect.outputs.run-files }}
     steps:
       - name: Generate app token
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.OMOQ_APP_ID }}
+          client-id: ${{ vars.OMOQ_APP_CLIENT_ID }}
           private-key: ${{ secrets.OMOQ_APP_PRIV_KEY }}
 
       - uses: actions/checkout@v5
@@ -147,53 +192,164 @@ jobs:
         env:
           PERF_RELAY_HOST:    ${{ secrets.PERF_RELAY_HOST }}
           PERF_CLIENT_HOST:   ${{ secrets.PERF_CLIENT_HOST }}
-          GH_TOKEN:           ${{ github.token }}
-          RELEASE:            ${{ inputs.release }}
+          PROFILE_SELECTION: ${{ inputs.profile || 'all' }}
+          STACK_SELECTION: ${{ inputs.quic_stack || 'both' }}
+          MVFST_CC: ${{ inputs.mvfst_cc || 'native' }}
+          TARGET_CPU_PCT: ${{ inputs.target_cpu_pct }}
+          SUBSCRIBER_OVERRIDE: ${{ inputs.subscribers || '0' }}
+          DURATION: ${{ inputs.duration || '120' }}
+          COMMIT_SHORT: ${{ steps.sha.outputs.short }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
         run: |
-          FILE="run-${{ steps.sha.outputs.short }}.json"
           # A release tag measures its published portable tarball instead of this
           # build. The moqtest tools still come from the build's moxygen prefix.
           BINARY=build/default/moqx
           MOQBIN_ARG=()
+          RUN_ID="$COMMIT_SHORT"
           if [[ -n "$RELEASE" ]]; then
             rm -rf _release
             gh release download "$RELEASE" --pattern moqx-linux-amd64.tar.gz --dir _release
             mkdir -p _release/moqx
             tar xzf _release/moqx-linux-amd64.tar.gz -C _release/moqx
             BINARY=_release/moqx/bin/moqx
-            FILE="run-${RELEASE}.json"
+            RUN_ID="$RELEASE"
             source build/default/moqx-tools.env
             MOQBIN_ARG=(--moqbin "$MOQBIN")
           fi
-          # Fallbacks: schedule events carry no `inputs`, so apply the canonical
-          # nightly load when invoked by cron.
-          bash scripts/perf/perf-test-ci.sh \
-            --binary         "$BINARY" "${MOQBIN_ARG[@]}" \
-            --duration       "${{ inputs.duration || '120' }}" \
-            --subscriber-max "${{ inputs.subscribers || '600' }}" \
-            --ramp           150 \
-            --io-threads     4 \
-            --client-threads 8 \
-            --client-args    "--first_object_size=26516 --other_object_size=3788 --objects_per_group 60 --delivery_timeout 5000" \
-            --cooldown       10 \
-            --output         "$FILE"
-          echo "run-file=$FILE" >> "$GITHUB_OUTPUT"
+
+          case "$PROFILE_SELECTION" in
+            all) mapfile -t PROFILES < <(jq -r '.profiles[].id' scripts/perf/profiles.json) ;;
+            1mbps|4mbps|16mbps) PROFILES=("$PROFILE_SELECTION") ;;
+            *) echo "ERROR: invalid profile input: $PROFILE_SELECTION" >&2; exit 1 ;;
+          esac
+
+          case "$STACK_SELECTION" in
+            both)     STACKS=(mvfst picoquic) ;;
+            mvfst)    STACKS=(mvfst) ;;
+            picoquic) STACKS=(picoquic) ;;
+            *) echo "ERROR: invalid quic_stack input: $STACK_SELECTION" >&2; exit 1 ;;
+          esac
+
+          case "$MVFST_CC" in
+            native|bbr|bbr2) ;;
+            *) echo "ERROR: mvfst_cc must be native, bbr, or bbr2" >&2; exit 1 ;;
+          esac
+
+          [[ -n "$TARGET_CPU_PCT" ]] || TARGET_CPU_PCT=300
+          if ! jq -en --argjson target "$TARGET_CPU_PCT" '($target | type) == "number" and $target > 0' >/dev/null; then
+            echo "ERROR: target_cpu_pct must be greater than zero" >&2
+            exit 1
+          fi
+          if [[ ! "$SUBSCRIBER_OVERRIDE" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: subscribers override must be zero or a positive integer" >&2
+            exit 1
+          fi
+          if [[ ! "$DURATION" =~ ^[0-9]+$ ]] || ((DURATION <= 0)); then
+            echo "ERROR: duration must be a positive integer" >&2
+            exit 1
+          fi
+
+          RUN_FILES=()
+          FAILED_CASES=()
+          for PROFILE in "${PROFILES[@]}"; do
+            PROFILE_DATA=$(jq -c --arg id "$PROFILE" '.profiles[] | select(.id == $id)' scripts/perf/profiles.json)
+            PROFILE_RATE=$(jq -r '.mbps_per_subscriber' <<< "$PROFILE_DATA")
+            PROFILE_BASE_SUBSCRIBERS=$(jq -r '.subscribers_at_300pct_cpu' <<< "$PROFILE_DATA")
+            FIRST_OBJECT_SIZE=$(jq -r '.first_object_size' <<< "$PROFILE_DATA")
+            OTHER_OBJECT_SIZE=$(jq -r '.other_object_size' <<< "$PROFILE_DATA")
+            DERIVED_SUBSCRIBERS=$(jq -nr --argjson target "$TARGET_CPU_PCT" --argjson subscribers "$PROFILE_BASE_SUBSCRIBERS" '((($target * $subscribers / 300 / 8) | ceil) * 8) | if . < 8 then 8 else . end')
+            if ((SUBSCRIBER_OVERRIDE > 0)); then
+              RUN_SUBSCRIBERS="$SUBSCRIBER_OVERRIDE"
+            else
+              RUN_SUBSCRIBERS="$DERIVED_SUBSCRIBERS"
+            fi
+            CLIENT_ARGS="--first_object_size=${FIRST_OBJECT_SIZE} --other_object_size=${OTHER_OBJECT_SIZE} --objects_per_group 60"
+
+            for STACK in "${STACKS[@]}"; do
+              CC_ARGS=()
+              if [[ "$STACK" == "mvfst" && "$MVFST_CC" != "native" ]]; then
+                CC_ARGS=(--cc "$MVFST_CC")
+              fi
+              # Preserve the established 1 Mbps filenames; higher-rate profiles
+              # add a profile component rather than replacing the old series.
+              if [[ "$PROFILE" == "1mbps" ]]; then
+                FILE="run-${RUN_ID}-${STACK}.json"
+              else
+                FILE="run-${RUN_ID}-${PROFILE}-${STACK}.json"
+              fi
+              rm -f "$FILE"
+              echo "Running $PROFILE on $STACK: CPU calibration target=${TARGET_CPU_PCT}% subscribers=$RUN_SUBSCRIBERS"
+              if bash scripts/perf/perf-test-ci.sh \
+                --binary                  "$BINARY" "${MOQBIN_ARG[@]}" \
+                --duration                "$DURATION" \
+                --subscriber-max          "$RUN_SUBSCRIBERS" \
+                --delivery-timeout        5000 \
+                --ramp                    150 \
+                --io-threads              4 \
+                --client-threads          8 \
+                --client-args             "$CLIENT_ARGS" \
+                --cooldown                10 \
+                --quic-stack              "$STACK" \
+                --profile                  "$PROFILE" \
+                --target-cpu-pct          "$TARGET_CPU_PCT" \
+                --profile-rate-mbps       "$PROFILE_RATE" \
+                --first-object-size       "$FIRST_OBJECT_SIZE" \
+                --other-object-size       "$OTHER_OBJECT_SIZE" \
+                "${CC_ARGS[@]}" \
+                --output                  "$FILE"; then
+                RUN_FILES+=("$FILE")
+              else
+                STATUS=$?
+                echo "WARNING: $PROFILE/$STACK perf run failed (exit $STATUS)" >&2
+                FAILED_CASES+=("$PROFILE/$STACK")
+              fi
+            done
+          done
+
+          {
+            echo "run-files<<EOF"
+            if ((${#RUN_FILES[@]})); then printf '%s\n' "${RUN_FILES[@]}"; fi
+            echo "EOF"
+            echo "failed-cases<<EOF"
+            if ((${#FAILED_CASES[@]})); then printf '%s\n' "${FAILED_CASES[@]}"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if ((${#FAILED_CASES[@]})); then
+            printf 'ERROR: requested perf case failed: %s\n' "${FAILED_CASES[@]}" >&2
+            exit 1
+          fi
 
       - name: Render step summary
         if: always()
         env:
-          FILE: ${{ steps.collect.outputs.run-file }}
+          FILES: ${{ steps.collect.outputs.run-files }}
+          FAILED_CASES: ${{ steps.collect.outputs.failed-cases }}
+          COMMIT_SHORT: ${{ steps.sha.outputs.short }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          TARGET_CPU_PCT: ${{ inputs.target_cpu_pct }}
+          DURATION: ${{ inputs.duration || '120' }}
+          RELEASE: ${{ inputs.release }}
         run: |
           {
             echo "## perf-test — $(date -u +'%Y-%m-%d %H:%M UTC')"
             echo
-            echo "ref: \`${{ steps.sha.outputs.short }}\` · branch: \`${{ github.ref_name }}\` · subs: ${{ inputs.subscribers || '600' }} · duration: ${{ inputs.duration || '120' }}s"
+            printf 'ref: `%s` · branch: `%s` · CPU calibration target: %s%% · duration: %ss\n' "$COMMIT_SHORT" "$BRANCH_NAME" "${TARGET_CPU_PCT:-300}" "$DURATION"
             echo
-            if [ -n "${{ inputs.release }}" ]; then
-              echo "binary: \`moqx-linux-amd64.tar.gz\` from release \`${{ inputs.release }}\`"
+            if [[ -n "$RELEASE" ]]; then
+              printf 'binary: `moqx-linux-amd64.tar.gz` from release `%s`\n' "$RELEASE"
               echo
             fi
-            if [ -f "$FILE" ]; then
+            if [[ -z "$FILES" ]]; then
+              echo "_no results JSON produced_"
+            fi
+            while IFS= read -r FILE; do
+              [[ -f "$FILE" ]] || continue
+              STACK=$(jq -r '.params.quic_stack // "mvfst"' "$FILE")
+              PROFILE=$(jq -r '.params.profile // "1mbps"' "$FILE")
+              SUBSCRIBERS=$(jq -r '.params.subscriber_max' "$FILE")
+              echo "### $PROFILE · $STACK ($SUBSCRIBERS subscribers)"
               echo '| metric | value |'
               echo '|---|---|'
               jq -r '
@@ -204,31 +360,59 @@ jobs:
                 | to_entries[]
                 | "| \(.key) | \(.value) |"
               ' "$FILE"
-            else
-              echo "_no results JSON produced_"
+              echo
+            done <<< "$FILES"
+            if [[ -n "$FAILED_CASES" ]]; then
+              printf 'Failed profile/stack case(s): %s\n' "$FAILED_CASES"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pull rolling baseline from currently-published Pages
         # Downloads index.json + the latest N run JSONs into data/ so
         # perf-compare.py can score the new run against history.
-        # No-op on the very first deploy (index.json 404).
+        # A 404 is an empty baseline only when explicitly authorized for bootstrap.
         env:
           BASE: https://openmoq.org/moqx/perf
-          KEEP: 180
+          KEEP: 1080
+          ALLOW_EMPTY_BASELINE: ${{ vars.MOQX_PERF_ALLOW_EMPTY_BASELINE || 'false' }}
         run: |
           mkdir -p data
-          if curl -fsSL "$BASE/index.json" -o data/index.json; then
-            jq -r '.runs[].file' data/index.json | head -n $((KEEP - 1)) | \
-              while read -r f; do
-                curl -fsSL "$BASE/$f" -o "data/$f" 2>/dev/null || true
-              done
+          MANIFEST="$RUNNER_TEMP/perf-index.json"
+          set +e
+          HTTP_STATUS=$(curl -sSL --retry 3 --retry-delay 2 --retry-max-time 30 \
+            -o "$MANIFEST" -w '%{http_code}' "$BASE/index.json")
+          CURL_STATUS=$?
+          set -e
+
+          if [[ "$HTTP_STATUS" == "404" && "$ALLOW_EMPTY_BASELINE" == "true" ]]; then
+            echo "::warning::No published perf baseline; explicit bootstrap is enabled."
+          elif [[ "$CURL_STATUS" -ne 0 || "$HTTP_STATUS" != "200" ]]; then
+            echo "ERROR: could not fetch perf baseline index (HTTP $HTTP_STATUS, curl $CURL_STATUS)." >&2
+            exit 1
+          else
+            if ! jq -e 'type == "object" and (.runs | type) == "array" and all(.runs[]; (.file | type) == "string" and (.file | test("^run-[A-Za-z0-9_.-]+\\.json$")))' "$MANIFEST" >/dev/null; then
+              echo "ERROR: published perf baseline index is malformed or contains an invalid run filename." >&2
+              exit 1
+            fi
+
+            cp "$MANIFEST" data/index.json
+            while IFS= read -r f; do
+              if ! curl -fsSL --retry 3 --retry-delay 2 --retry-max-time 30 \
+                "$BASE/$f" -o "data/$f"; then
+                echo "ERROR: could not download indexed perf run: $f" >&2
+                exit 1
+              fi
+              if ! jq -e 'type == "object"' "data/$f" >/dev/null; then
+                echo "ERROR: indexed perf run is not valid JSON: $f" >&2
+                exit 1
+              fi
+            done < <(jq -r --argjson limit "$((KEEP - 1))" '.runs[:$limit][] | .file' "$MANIFEST")
           fi
 
       - name: Stage Pages payload (dashboard + rolling window + new run)
         env:
-          KEEP: 180
-          FILE: ${{ steps.collect.outputs.run-file }}
+          KEEP: 1080
+          FILES: ${{ steps.collect.outputs.run-files }}
         run: |
           OUT=perf-out
           mkdir -p "$OUT/perf"
@@ -237,15 +421,18 @@ jobs:
           # Copy historical runs, then the new run (overrides any stale copy
           # of the same SHA name)
           cp data/run-*.json "$OUT/perf/" 2>/dev/null || true
-          cp "$FILE" "$OUT/perf/$FILE"
+          while IFS= read -r FILE; do
+            [[ -f "$FILE" ]] || continue
+            cp "$FILE" "$OUT/perf/$FILE"
+          done <<< "$FILES"
           # Rebuild manifest with per-run metadata (branch + timestamp). The
           # run filenames are SHA-based, so they cannot be ordered by name —
-          # sort newest-first by timestamp. perf-compare.py filters entries by
-          # branch and the dashboard relies on chronological ordering. Cap KEEP.
+          # sort newest-first by timestamp. Historical files without a stack
+          # value are mvfst/1mbps runs. Cap KEEP across all profile/stack series.
           for f in "$OUT/perf/"run-*.json; do
             [ -e "$f" ] || continue
             jq -c --arg file "$(basename "$f")" \
-              '{file: $file, branch: (.branch // "unknown"), timestamp: (.timestamp // ""), commit: (.commit // "")}' "$f"
+              '{file: $file, branch: (.branch // "unknown"), quic_stack: (.params.quic_stack // "mvfst"), profile: (.params.profile // "1mbps"), timestamp: (.timestamp // ""), commit: (.commit // "")}' "$f"
           done \
             | jq -s "sort_by(.timestamp) | reverse | .[0:${KEEP}] | {runs: .}" \
             > "$OUT/perf/index.json"
@@ -264,31 +451,53 @@ jobs:
         with:
           name: perf-results
           path: |
-            ${{ steps.collect.outputs.run-file }}
+            ${{ steps.collect.outputs.run-files }}
+            run-*.relay.log
+            run-*.client.log
             perf-out/
           retention-days: 30
 
       - name: Compare vs rolling baseline (report)
         # Opt-in via the `compare` input. perf-compare.py is non-blocking
         # (always exits 0) and renders a "no baseline yet" note on first run.
-        # Always compares against the published main trend, so the report is
-        # only meaningful when run at matching load (subs=1000).
+        # Each current run is compared only with history for its own profile/stack.
         if: ${{ inputs.compare }}
         env:
-          FILE: ${{ steps.collect.outputs.run-file }}
+          FILES: ${{ steps.collect.outputs.run-files }}
         run: |
-          python3 scripts/perf/perf-compare.py \
-            --current "$FILE" \
-            --data-dir data \
-            --window 10 \
-            --threshold 5 \
-            --output comment.md
-          {
-            echo
-            echo "## perf comparison vs published baseline (subs=${{ inputs.subscribers || '600' }})"
-            echo
-            cat comment.md
-          } >> "$GITHUB_STEP_SUMMARY"
+          : > comment.md
+          COMPARED=0
+          while IFS= read -r FILE; do
+            [[ -f "$FILE" ]] || continue
+            STACK=$(jq -r '.params.quic_stack // "mvfst"' "$FILE")
+            PROFILE=$(jq -r '.params.profile // "1mbps"' "$FILE")
+            SUBSCRIBERS=$(jq -r '.params.subscriber_max' "$FILE")
+            REPORT="comment-${PROFILE}-${STACK}.md"
+            python3 scripts/perf/perf-compare.py \
+              --current "$FILE" \
+              --data-dir data \
+              --window 10 \
+              --threshold 5 \
+              --output "$REPORT"
+            {
+              echo "## $PROFILE · $STACK perf comparison vs published baseline ($SUBSCRIBERS subscribers)"
+              echo
+              cat "$REPORT"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## $PROFILE · $STACK"
+              echo
+              cat "$REPORT"
+              echo
+            } >> comment.md
+            COMPARED=1
+          done <<< "$FILES"
+
+          if [[ "$COMPARED" -eq 0 ]]; then
+            echo "No successful profile/stack results were available to compare." > comment.md
+            echo "No successful profile/stack results were available to compare." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Post comparison report to PR
         # Only when a PR number is supplied. Blank `pr` = zero PR footprint;
@@ -324,7 +533,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.OMOQ_APP_ID }}
+          client-id: ${{ vars.OMOQ_APP_CLIENT_ID }}
           private-key: ${{ secrets.OMOQ_APP_PRIV_KEY }}
       - id: deployment
         uses: actions/deploy-pages@v5

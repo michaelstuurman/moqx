@@ -35,6 +35,14 @@ MATCHER_P(HasChainDataLengthOf, n, "") {
   return arg->computeChainDataLength() == uint64_t(n);
 }
 
+MATCHER_P(HasPayload, expected, "") {
+  std::string actual;
+  for (auto range : *arg) {
+    actual.append(reinterpret_cast<const char*>(range.data()), range.size());
+  }
+  return actual == expected;
+}
+
 // Helper to create extensions with Prior Object ID Gap
 Extensions makeObjectGapExtensions(uint64_t gap) {
   Extensions ext;
@@ -830,6 +838,21 @@ CO_TEST_F(MoqxCacheTest, TestFetchOnLiveTrackPastLargest) {
   expectFetchObjects({0, 0}, {0, 1}, false);
 }
 
+// A live fetch ends at upstream's Largest and fetches the uncached part upstream.
+CO_TEST_F(MoqxCacheTest, TestLiveFetchRunsToUpstreamLargest) {
+  populateCacheRange({0, 0}, {0, 5});
+  auto writeback = cache_.getSubscribeWriteback(kTestTrackName, trackConsumer_);
+  cache_.setTrackState(kTestTrackName, AbsoluteLocation{1, 4}, noExtensions());
+
+  expectUpstreamFetch({0, 5}, {1, 5}, 0, AbsoluteLocation{1, 5});
+  auto res = co_await cache_.fetch(getFetch({0, 0}, {1, 5}), trackingConsumer_, upstream_);
+  CO_ASSERT_TRUE(res.hasValue());
+  EXPECT_EQ(res.value()->fetchOk().endLocation, (AbsoluteLocation{1, 5}));
+  expectFetchObjects({0, 0}, {1, 5}, true);
+  co_await folly::coro::co_reschedule_on_current_executor;
+  serveCacheRangeFromUpstream({0, 5}, {1, 5});
+}
+
 CO_TEST_F(MoqxCacheTest, TestFetchEndBeyondEndOfTrack) {
   // Test case for fetch end beyond the end of track
   populateCacheRange({0, 0}, {0, 5});
@@ -1389,6 +1412,44 @@ CO_TEST_F(MoqxCacheTest, TestRecacheStreamedObjectWithPartialFirstChunk) {
       .WillOnce(Return(folly::unit));
   auto fetchRes = co_await cache_.fetch(getFetch({0, 0}, {0, 1}), trackingConsumer_, upstream_);
   EXPECT_TRUE(fetchRes.hasValue());
+  co_await folly::coro::co_reschedule_on_current_executor;
+}
+
+// A streamed object's chunks are cached in arrival order (#807).
+CO_TEST_F(MoqxCacheTest, TestStreamedObjectChunksCachedInOrder) {
+  auto writeback = cache_.getSubscribeWriteback(kTestTrackName, trackConsumer_);
+  auto subgroupConsumer = writeback->beginSubgroup(0, 0, 0).value();
+  EXPECT_FALSE(subgroupConsumer->beginObject(0, 9, folly::IOBuf::copyBuffer("aaa")).hasError());
+  EXPECT_FALSE(subgroupConsumer->objectPayload(folly::IOBuf::copyBuffer("bbb"), false).hasError());
+  EXPECT_FALSE(subgroupConsumer->objectPayload(folly::IOBuf::copyBuffer("ccc"), false).hasError());
+  writeback.reset();
+
+  EXPECT_CALL(*consumer_, object(0, 0, 0, HasPayload("aaabbbccc"), _, _, _))
+      .WillOnce(Return(folly::unit));
+  auto res = co_await cache_.fetch(getFetch({0, 0}, {0, 1}), trackingConsumer_, upstream_);
+  EXPECT_TRUE(res.hasValue());
+  co_await folly::coro::co_reschedule_on_current_executor;
+}
+
+CO_TEST_F(MoqxCacheTest, TestUpstreamFetchedObjectChunksCachedInOrder) {
+  expectUpstreamFetch({0, 0}, {0, 1}, 0, AbsoluteLocation{0, 0})
+      .via(co_await folly::coro::co_current_executor)
+      .thenTry([this](auto) {
+        upstreamFetchConsumer_->beginObject(0, 0, 0, 9, folly::IOBuf::copyBuffer("aaa"));
+        upstreamFetchConsumer_->objectPayload(folly::IOBuf::copyBuffer("bbb"), false);
+        upstreamFetchConsumer_->objectPayload(folly::IOBuf::copyBuffer("ccc"), true);
+      });
+  EXPECT_CALL(*consumer_, beginObject(0, 0, 0, 9, _, _)).WillOnce(Return(folly::unit));
+  EXPECT_CALL(*consumer_, objectPayload(_, _))
+      .Times(2)
+      .WillRepeatedly(Return(ObjectPublishStatus::IN_PROGRESS));
+  auto res = co_await cache_.fetch(getFetch({0, 0}, {0, 1}), trackingConsumer_, upstream_);
+  EXPECT_TRUE(res.hasValue());
+
+  EXPECT_CALL(*consumer_, object(0, 0, 0, HasPayload("aaabbbccc"), _, _, _))
+      .WillOnce(Return(folly::unit));
+  res = co_await cache_.fetch(getFetch({0, 0}, {0, 1}), trackingConsumer_, upstream_);
+  EXPECT_TRUE(res.hasValue());
   co_await folly::coro::co_reschedule_on_current_executor;
 }
 
@@ -2310,7 +2371,7 @@ TEST_F(MoqxCacheTest, TestDatagramForwardsLastInGroup) {
 TEST_F(MoqxCacheTest, TestDatagramForwardsLastInGroupWhenCachingSkipped) {
   // Same as above, but on the shouldSkipCaching() passthrough path.
   cache_.setDefaultMaxCacheDuration(std::chrono::milliseconds(0));
-  cache_.setTrackExtensions(kTestTrackName, Extensions{});
+  cache_.setTrackState(kTestTrackName, std::nullopt, Extensions{});
   auto writeback = cache_.getSubscribeWriteback(kTestTrackName, trackConsumer_);
 
   EXPECT_CALL(*trackConsumer_, datagram(_, _, true)).WillOnce(Return(folly::unit));
@@ -2740,7 +2801,7 @@ CO_TEST_F(MoqxCacheTest, TestSkipUncachedAfterTTLExpiration) {
   // takes the "live track" fast path and fires fetchImpl asynchronously.
   auto currentTime = std::make_shared<MoqxCache::TimePoint>(MoqxCache::SteadyClock::now());
   cache_.setClockForTesting([currentTime]() { return *currentTime; });
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   auto wb = cache_.getSubscribeWriteback(kTestTrackName, trackConsumer_);
   wb->datagram(ObjectHeader(0, 0, 0, 0, 100), makeBuf(100));
@@ -3819,7 +3880,7 @@ TEST_F(MoqxCacheTest, TestMaxCacheDurationExpiration) {
   populateCacheRange({0, 0}, {0, 5});
   EXPECT_TRUE(cache_.hasCachedObject(kTestTrackName, {0, 0}));
 
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   // Advance clock past TTL
   currentTime += std::chrono::milliseconds(1001);
@@ -3834,7 +3895,7 @@ TEST_F(MoqxCacheTest, TestMaxCacheDurationNotExpired) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   populateCacheRange({0, 0}, {0, 5});
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   // Advance clock within TTL
   currentTime += std::chrono::milliseconds(999);
@@ -3864,7 +3925,7 @@ TEST_F(MoqxCacheTest, TestMaxCacheDurationRefreshOnRecache) {
   auto currentTime = MoqxCache::SteadyClock::now();
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   // Cache object at T=0
   populateCacheRange({0, 0}, {0, 1});
@@ -3889,7 +3950,7 @@ CO_TEST_F(MoqxCacheTest, TestMaxCacheDurationFetchMissOnExpired) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   populateCacheRange({0, 0}, {0, 10});
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   // Advance past TTL
   currentTime += std::chrono::milliseconds(1001);
@@ -3917,7 +3978,7 @@ TEST_F(MoqxCacheTest, TestMaxCacheDurationMixedExpiration) {
   auto currentTime = MoqxCache::SteadyClock::now();
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   // Cache objects 0-4 at T=0
   populateCacheRange({0, 0}, {0, 5});
@@ -3942,10 +4003,10 @@ TEST_F(MoqxCacheTest, TestClearMaxCacheDuration) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   populateCacheRange({0, 0}, {0, 5});
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
 
   // Clear the TTL by updating extensions without a cache duration
-  cache_.setTrackExtensions(kTestTrackName, Extensions{});
+  cache_.setTrackState(kTestTrackName, std::nullopt, Extensions{});
 
   // Advance clock past what was the TTL
   currentTime += std::chrono::milliseconds(2000);
@@ -3978,7 +4039,7 @@ TEST_F(MoqxCacheTest, TestPerTrackDurationOverridesDefault) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   cache_.setDefaultMaxCacheDuration(std::chrono::milliseconds(500));
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(2000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(2000));
   populateCacheRange({0, 0}, {0, 5});
 
   // Past the default TTL but within the per-track TTL
@@ -3993,7 +4054,7 @@ TEST_F(MoqxCacheTest, TestPerTrackDurationOverridesDefault) {
 TEST_F(MoqxCacheTest, TestZeroDefaultDurationSkipsCaching) {
   // defaultMaxCacheDuration=0ms + no publisher duration → objects not cached.
   cache_.setDefaultMaxCacheDuration(std::chrono::milliseconds(0));
-  cache_.setTrackExtensions(kTestTrackName, Extensions{});
+  cache_.setTrackState(kTestTrackName, std::nullopt, Extensions{});
   populateCacheRange({0, 0}, {0, 5});
 
   EXPECT_FALSE(cache_.hasCachedObject(kTestTrackName, {0, 0}));
@@ -4006,7 +4067,7 @@ TEST_F(MoqxCacheTest, TestZeroDefaultDurationPublisherOverrides) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   cache_.setDefaultMaxCacheDuration(std::chrono::milliseconds(0));
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(1000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(1000));
   populateCacheRange({0, 0}, {0, 5});
 
   EXPECT_TRUE(cache_.hasCachedObject(kTestTrackName, {0, 0}));
@@ -4022,7 +4083,7 @@ TEST_F(MoqxCacheTest, TestMaxAllowedCacheDurationClampsPublisher) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   cache_.setMaxAllowedCacheDuration(std::chrono::milliseconds(500));
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(2000));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(2000));
   populateCacheRange({0, 0}, {0, 5});
 
   // Within the cap
@@ -4040,7 +4101,7 @@ TEST_F(MoqxCacheTest, TestMaxAllowedCacheDurationNoClampWhenUnder) {
   cache_.setClockForTesting([&currentTime]() { return currentTime; });
 
   cache_.setMaxAllowedCacheDuration(std::chrono::milliseconds(500));
-  cache_.setTrackExtensions(kTestTrackName, makeCacheDurationExt(300));
+  cache_.setTrackState(kTestTrackName, std::nullopt, makeCacheDurationExt(300));
   populateCacheRange({0, 0}, {0, 5});
 
   // Within publisher TTL
@@ -4135,11 +4196,11 @@ TEST_F(MoqxCacheTest, SubgroupWritebackBeginObjectCacheErrorResetsInner) {
 }
 
 CO_TEST_F(MoqxCacheTest, TestFetchOkIncludesTrackExtensions) {
-  // Set extensions on the track via setTrackExtensions
+  // Set extensions on the track via setTrackState
   Extensions ext;
   ext.insertMutableExtension(Extension{kDeliveryTimeoutExtensionType, 5000});
   ext.insertMutableExtension(Extension{0xBEEF'0000, 42});
-  cache_.setTrackExtensions(kTestTrackName, ext);
+  cache_.setTrackState(kTestTrackName, std::nullopt, ext);
 
   // Populate cache so the fetch is a full cache hit
   populateCacheRange({0, 0}, {0, 10});
@@ -4169,7 +4230,7 @@ CO_TEST_F(MoqxCacheTest, TestUpstreamFetchSavesExtensionsToTrack) {
 
   // Set extensions on the track (simulates what MoQRelay does after
   // SubscribeOk)
-  cache_.setTrackExtensions(kTestTrackName, upstreamExt);
+  cache_.setTrackState(kTestTrackName, std::nullopt, upstreamExt);
 
   // Serve data from upstream so the cache is populated
   expectFetchObjects({0, 0}, {0, 10}, true);
@@ -4456,7 +4517,9 @@ CO_TEST_F(MoqxCacheTest, TestTrackEvictionWithOpenSubgroupDoesNotSpin) {
 
   EXPECT_FALSE(cache_.hasCachedObject(kTestTrackName, {2, 0}));
   EXPECT_TRUE(cache_.hasCachedObject(kTestTrackName, {3, 0}));
-  EXPECT_EQ(cache_.totalCachedBytes(), 100u);
+  // track2 is live and group 0 is its newest: a join point, kept.
+  EXPECT_TRUE(cache_.hasCachedObject(track2, {0, 0}));
+  EXPECT_EQ(cache_.totalCachedBytes(), 200u);
   co_return;
 }
 
@@ -4778,7 +4841,7 @@ TEST_F(MoqxCacheTest, ExpiredObjectByteAccounting) {
   // Set per-track cache duration on track A only, and advance clock past expiry
   auto testClock = MoqxCache::SteadyClock::now();
   cache_.setClockForTesting([&testClock]() { return testClock; });
-  cache_.setTrackExtensions(trackA, makeCacheDurationExt(1));
+  cache_.setTrackState(trackA, std::nullopt, makeCacheDurationExt(1));
   testClock += std::chrono::milliseconds(100);
 
   // Trigger expiry erasure on track A's object — leaks 100 bytes in
@@ -5023,4 +5086,65 @@ CO_TEST_F(MoqxCacheTest, FetchWritebackCachesZeroLengthNormalObject) {
   auto end = upstreamFetchConsumer_->endOfFetch();
   EXPECT_TRUE(end.hasValue());
 }
+
+CO_TEST_F(MoqxCacheTest, ByteLimitEvictionSparesEachLiveTracksNewestGroup) {
+  // A once-written track (a catalog) is the oldest in the global LRU, so byte
+  // pressure evicted it first. Each live track's newest group is kept.
+  cache_.setMinEvictionBytes(0);
+  cache_.setMaxCachedBytes(700);
+
+  // The "catalog": six groups written up front, then nothing more.
+  FullTrackName catalog{TrackNamespace{{"live"}}, "catalog"};
+  auto catalogWriteback = cache_.getSubscribeWriteback(catalog, trackConsumer_);
+  for (uint64_t g = 0; g <= 5; ++g) {
+    catalogWriteback->datagram(ObjectHeader(g, 0, 0, 0, 100), makeBuf(100));
+  }
+
+  // The "video": keeps writing, and pushes the cache over its byte limit.
+  FullTrackName video{TrackNamespace{{"live"}}, "video"};
+  auto videoWriteback = cache_.getSubscribeWriteback(video, trackConsumer_);
+  for (uint64_t g = 0; g <= 9; ++g) {
+    videoWriteback->datagram(ObjectHeader(g, 0, 0, 0, 100), makeBuf(100));
+  }
+
+  // Older groups of both tracks are evicted; each live track keeps its newest.
+  EXPECT_TRUE(cache_.hasCachedObject(catalog, {5, 0}));
+  EXPECT_FALSE(cache_.hasCachedObject(catalog, {0, 0}));
+  EXPECT_TRUE(cache_.hasCachedObject(video, {9, 0}));
+  EXPECT_FALSE(cache_.hasCachedObject(video, {0, 0}));
+  EXPECT_EQ(cache_.totalCachedBytes(), 700u);
+
+  // A late subscriber's FETCH for it is served from the cache alone: upstream_
+  // is a StrictMock and must not be asked.
+  auto res = co_await cache_.fetch(getFetch(catalog, {5, 0}, {5, 1}), trackingConsumer_, upstream_);
+  EXPECT_TRUE(res.hasValue());
+  EXPECT_EQ(res.value()->fetchOk().endLocation, (AbsoluteLocation{5, 1}));
+  expectFetchObjects({5, 0}, {5, 1}, false);
+}
+
+TEST_F(MoqxCacheTest, ByteLimitEvictionTakesTheNewestGroupOnceTheTrackIsNotLive) {
+  // The protection lasts exactly as long as the track is being published. Once
+  // its writeback is gone, the newest group is an ordinary LRU entry again.
+  cache_.setMinEvictionBytes(0);
+  cache_.setMaxCachedBytes(700);
+
+  FullTrackName catalog{TrackNamespace{{"live"}}, "catalog"};
+  auto catalogWriteback = cache_.getSubscribeWriteback(catalog, trackConsumer_);
+  for (uint64_t g = 0; g <= 5; ++g) {
+    catalogWriteback->datagram(ObjectHeader(g, 0, 0, 0, 100), makeBuf(100));
+  }
+  catalogWriteback.reset();
+
+  FullTrackName video{TrackNamespace{{"live"}}, "video"};
+  auto videoWriteback = cache_.getSubscribeWriteback(video, trackConsumer_);
+  for (uint64_t g = 0; g <= 9; ++g) {
+    videoWriteback->datagram(ObjectHeader(g, 0, 0, 0, 100), makeBuf(100));
+  }
+
+  EXPECT_FALSE(cache_.hasCachedObject(catalog, {5, 0}));
+  EXPECT_TRUE(cache_.hasCachedObject(video, {9, 0}));
+  EXPECT_FALSE(cache_.hasCachedObject(video, {0, 0}));
+  EXPECT_EQ(cache_.totalCachedBytes(), 700u);
+}
+
 } // namespace openmoq::moqx::test

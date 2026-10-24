@@ -8,6 +8,7 @@
 #include "MoQIntegrationTestFixture.h"
 #include "MoqxRelay.h"
 
+#include <folly/coro/Baton.h>
 #include <folly/coro/BlockingWait.h>
 #include <folly/coro/Collect.h>
 #include <folly/coro/Sleep.h>
@@ -56,7 +57,6 @@ Publisher::TrackStatusResult makeTrackStatusOk(const TrackStatus& req) {
   TrackStatusOk ok;
   ok.requestID = req.requestID;
   ok.trackAlias = TrackAlias(req.requestID.value);
-  ok.statusCode = TrackStatusCode::IN_PROGRESS;
   return ok;
 }
 
@@ -141,6 +141,8 @@ protected:
 
   void TearDown() override {
     provider_->stop();
+    // Clear the hooks before the server teardown closes the session.
+    clientEvb().loopOnce();
     MoQIntegrationTestFixture::TearDown();
   }
 
@@ -207,6 +209,61 @@ TEST_F(UpstreamProviderTest, ConnectAndSetup) {
       [&]() -> folly::coro::Task<void> {
         co_await provider_->start();
         EXPECT_NE(provider_->currentSession(), nullptr);
+      }(),
+      &clientEvb()
+  );
+}
+
+// The server declares a Hop ID, as a moqx relay listener does.
+class UpstreamClusterTest : public UpstreamProviderTest {
+protected:
+  static constexpr uint64_t kServerHop = 500;
+
+  void configureServer(moxygen::MoQServer& server) override {
+    server.addSetupParameter(SetupParameter(folly::to_underlying(SetupKey::HOP_ID), kServerHop));
+  }
+};
+
+TEST_F(UpstreamClusterTest, NegotiatesClusterOnDraft18) {
+  provider_ = std::make_shared<UpstreamProvider>(
+      clientExec(),
+      serverUrl(),
+      /*publishHandler=*/nullptr,
+      /*subscribeHandler=*/nullptr,
+      std::make_shared<moxygen::test::InsecureVerifierDangerousDoNotUseInProduction>(),
+      /*onConnect=*/nullptr,
+      /*onDisconnect=*/nullptr,
+      std::chrono::milliseconds(5000),
+      std::chrono::milliseconds(5000),
+      /*hopID=*/400
+  );
+  folly::coro::blockingWait(
+      [&]() -> folly::coro::Task<void> {
+        co_await provider_->start();
+        auto session = provider_->currentSession();
+        EXPECT_NE(session, nullptr);
+        if (session) {
+          EXPECT_EQ(getDraftMajorVersion(*session->getNegotiatedVersion()), 18u);
+          EXPECT_TRUE(session->negotiatedSetupExtension(SetupExtension::RelayHops));
+          EXPECT_EQ(session->getPeerHopID(), kServerHop);
+        }
+      }(),
+      &clientEvb()
+  );
+}
+
+// Relay-to-relay links use draft 18.
+TEST_F(UpstreamProviderTest, ConnectsWithDraft18) {
+  folly::coro::blockingWait(
+      [&]() -> folly::coro::Task<void> {
+        co_await provider_->start();
+        auto session = provider_->currentSession();
+        EXPECT_NE(session, nullptr);
+        auto version = session ? session->getNegotiatedVersion() : std::nullopt;
+        EXPECT_TRUE(version.has_value());
+        if (version) {
+          EXPECT_EQ(getDraftMajorVersion(*version), 18u);
+        }
       }(),
       &clientEvb()
   );
@@ -305,6 +362,33 @@ TEST_F(UpstreamProviderTest, SubscribeNamespaceForwardsToUpstream) {
   );
 }
 
+// Draft 18 SUBSCRIBE_NAMESPACE does not carry the PUBLISH option, so the
+// provider must send SUBSCRIBE_TRACKS itself.
+TEST_F(UpstreamProviderTest, SubscribeTracksForwardsToUpstream) {
+  EXPECT_CALL(*serverPublisher_, subscribeNamespace(_, _)).Times(0);
+  EXPECT_CALL(*serverPublisher_, subscribeTracks(_, _))
+      .WillOnce(
+          [](SubscribeTracks subTracks, std::shared_ptr<Publisher::PublishBlockedHandle>)
+              -> folly::coro::Task<Publisher::SubscribeTracksResult> {
+            EXPECT_EQ(subTracks.trackNamespacePrefix, kTestNamespace);
+            co_return std::make_shared<NiceMock<MockSubscribeTracksHandle>>(
+                SubscribeTracksOk{subTracks.requestID}
+            );
+          }
+      );
+
+  folly::coro::blockingWait(
+      [&]() -> folly::coro::Task<void> {
+        SubscribeTracks subTracks;
+        subTracks.requestID = RequestID(3);
+        subTracks.trackNamespacePrefix = kTestNamespace;
+        auto result = co_await provider_->subscribeTracks(std::move(subTracks), nullptr);
+        EXPECT_TRUE(result.hasValue());
+      }(),
+      &clientEvb()
+  );
+}
+
 TEST_F(UpstreamProviderTest, PublishNamespaceForwardsToUpstream) {
   expectPublishNamespace();
 
@@ -362,6 +446,7 @@ TEST_F(UpstreamProviderTest, StopFailsPendingOperations) {
       [&]() -> folly::coro::Task<void> {
         co_await provider_->start();
         provider_->stop();
+        co_await folly::coro::co_reschedule_on_current_executor;
 
         bool threw = false;
         try {
@@ -426,6 +511,7 @@ TEST_F(UpstreamProviderTest, PublishFailsWhenStopped) {
   pub.fullTrackName = kTestTrack;
   pub.groupOrder = GroupOrder::OldestFirst;
 
+  clientEvb().loopOnce();
   auto result = provider_->publish(std::move(pub), nullptr);
   EXPECT_TRUE(result.hasError());
   EXPECT_EQ(result.error().errorCode, PublishErrorCode::INTERNAL_ERROR);
@@ -543,6 +629,23 @@ TEST_F(UpstreamProviderTest, WaitForConnectedAlreadyConnected) {
   );
 }
 
+// A caller on another thread must not read provider state until the provider's executor runs.
+TEST_F(UpstreamProviderTest, WaitForConnectedRunsOnProviderExecutor) {
+  folly::EventBase callerEvb;
+  bool done = false;
+  auto waiter = [&]() -> folly::coro::Task<void> {
+    co_await provider_->waitForConnected(std::chrono::milliseconds(100));
+    done = true;
+  };
+  folly::coro::co_withExecutor(&callerEvb, waiter()).start();
+
+  callerEvb.loopOnce(EVLOOP_NONBLOCK);
+  EXPECT_FALSE(done);
+  clientEvb().loopOnce(EVLOOP_NONBLOCK);
+  callerEvb.loopOnce(EVLOOP_NONBLOCK);
+  EXPECT_TRUE(done);
+}
+
 // --- Shutdown / close paths ---
 
 // stop() with no session established — dtor XCHECK (!session_ && !client_) must hold.
@@ -634,6 +737,78 @@ TEST_F(UpstreamProviderTest, StopSuppressesReconnectAfterSessionClose) {
   );
 }
 
+// stop() clears onConnect_ while its coroutine is suspended; the coroutine still reads its
+// captures when it resumes.
+TEST_F(UpstreamProviderTest, StopDuringOnConnectKeepsHookAlive) {
+  folly::coro::Baton entered, release;
+  auto marker = std::make_shared<int>(0);
+  provider_ = std::make_shared<UpstreamProvider>(
+      clientExec(),
+      serverUrl(),
+      /*publishHandler=*/nullptr,
+      /*subscribeHandler=*/nullptr,
+      std::make_shared<moxygen::test::InsecureVerifierDangerousDoNotUseInProduction>(),
+      /*onConnect=*/
+      [marker, &entered, &release](std::shared_ptr<MoQSession>) -> folly::coro::Task<void> {
+        entered.post();
+        co_await release;
+        ++*marker;
+      }
+  );
+
+  folly::coro::blockingWait(
+      [&]() -> folly::coro::Task<void> {
+        folly::coro::co_withExecutor(&clientEvb(), provider_->start()).start();
+        co_await entered;
+        provider_->stop();
+        co_await folly::coro::co_reschedule_on_current_executor;
+        release.post();
+        co_await folly::coro::co_reschedule_on_current_executor;
+      }(),
+      &clientEvb()
+  );
+}
+
+// stop() during the hook closes the session, so the connect it interrupted must fail.
+TEST_F(UpstreamProviderTest, StopDuringOnConnectFailsSubscribe) {
+  folly::coro::Baton entered, release;
+  provider_ = std::make_shared<UpstreamProvider>(
+      clientExec(),
+      serverUrl(),
+      /*publishHandler=*/nullptr,
+      /*subscribeHandler=*/nullptr,
+      std::make_shared<moxygen::test::InsecureVerifierDangerousDoNotUseInProduction>(),
+      /*onConnect=*/
+      [&entered, &release](std::shared_ptr<MoQSession>) -> folly::coro::Task<void> {
+        entered.post();
+        co_await release;
+      }
+  );
+
+  bool done = false;
+  bool threw = false;
+  auto subscribe = [&]() -> folly::coro::Task<void> {
+    auto result = co_await folly::coro::co_awaitTry(
+        provider_->subscribe(makeSubscribeRequest(), makeReceiver())
+    );
+    threw = result.hasException();
+    done = true;
+  };
+  folly::coro::blockingWait(
+      [&]() -> folly::coro::Task<void> {
+        folly::coro::co_withExecutor(&clientEvb(), subscribe()).start();
+        co_await entered;
+        provider_->stop();
+        co_await folly::coro::co_reschedule_on_current_executor;
+        release.post();
+        co_await folly::coro::sleep(std::chrono::milliseconds(50));
+      }(),
+      &clientEvb()
+  );
+  EXPECT_TRUE(done);
+  EXPECT_TRUE(threw);
+}
+
 // ===== RelayUpstreamSubscribeRaceTest =============================================
 //
 // Regression test for the TOCTOU race in MoqxRelay::subscribe() that caused
@@ -671,6 +846,16 @@ protected:
 
   void SetUp() override {
     serverPublisher_ = std::make_shared<NiceMock<MockPublisher>>();
+    // The peering handshake waits for this reply.
+    ON_CALL(*serverPublisher_, subscribeTracks(_, _))
+        .WillByDefault(
+            [](SubscribeTracks subTracks, std::shared_ptr<Publisher::PublishBlockedHandle>)
+                -> folly::coro::Task<Publisher::SubscribeTracksResult> {
+              SubscribeTracksOk ok;
+              ok.requestID = subTracks.requestID;
+              co_return std::make_shared<NiceMock<MockSubscribeTracksHandle>>(std::move(ok));
+            }
+        );
     MoQIntegrationTestFixture::SetUp();
 
     relay_ = std::make_shared<MoqxRelay>(config::CacheConfig{.maxCachedTracks = 0});

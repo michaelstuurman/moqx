@@ -9,6 +9,28 @@ How to add an entry: see [CONTRIBUTING.md](/CONTRIBUTING.md#changelog).
 [Unreleased]
 ============
 
+## Added
+
+- Admin API: [`/qlog/capture`](/docs/logging.md#on-demand-capture) qlogs the next N new mvfst connections on a running relay. ([#779](https://github.com/openmoq/moqx/pull/779))
+
+## Changed
+
+- **Breaking:** an [`upstream`](/docs/config.md#upstreams) connection uses MoQT draft 18, so the upstream relay's listener must include 18 in `moqt_versions`. Peering also carries tracks that publishers push with PUBLISH. ([#833](https://github.com/openmoq/moqx/pull/833))
+- **Breaking:** [MoQ Cluster](/docs/moq-cluster.md) ([draft-01](https://datatracker.ietf.org/doc/draft-lcurley-moq-cluster/01/)) replaces relay hops. Advertisements now carry `ROUTE_COST`. Loop protection requires every relay in a cycle to run this version. ([#836](https://github.com/openmoq/moqx/pull/836))
+
+## Fixed
+
+- The relay could crash when a new PUBLISH replaced a track that a TRACK_FILTER subscription was ranking. ([#823](https://github.com/openmoq/moqx/pull/823))
+- Docker: the relay image starts with its default config under a non-root uid; `/var/log/moqx/qlog` is created writable. ([#827](https://github.com/openmoq/moqx/pull/827))
+- With an [`upstream`](/docs/config.md#upstreams) configured, the relay could crash while waiting for the upstream connection or while shutting down. ([#821](https://github.com/openmoq/moqx/pull/821))
+- With an [`upstream`](/docs/config.md#upstreams) configured, the relay could crash when it shut down just as the upstream connection completed. ([#825](https://github.com/openmoq/moqx/pull/825))
+- The relay leaked memory each time a subscriber rejected a track that the relay pushed with PUBLISH. ([#831](https://github.com/openmoq/moqx/pull/831))
+- After a publisher restarted a track, a FETCH that the relay answered from its cache stopped at the previous session's Largest Object and did not return the newer objects. ([#849](https://github.com/openmoq/moqx/pull/849))
+- A track that a publisher pushed with PUBLISH had the same stale-Largest FETCH problem after a restart, and its publisher-set cache duration was ignored in favor of the [cache](/docs/config.md#cache) default. ([#850](https://github.com/openmoq/moqx/pull/850))
+
+[0.3.6] - 2026-10-10
+====================
+
 - **Breaking:** dropped MoQT draft-14 support. ([#761](https://github.com/openmoq/moqx/pull/761))
   - A config with [`moqt_versions`](/docs/config.md#listeners) containing 14 fails at startup.
 
@@ -20,7 +42,10 @@ How to add an entry: see [CONTRIBUTING.md](/CONTRIBUTING.md#changelog).
 
 ## Changed
 
+- Docker image: the mvfst listener defaults to bbr2 congestion control (`MOQX_CC`). ([#801](https://github.com/openmoq/moqx/pull/801))
 - A draft-18 SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS matching more than 1000 namespaces and tracks fails with NAMESPACE_TOO_LARGE. ([#667](https://github.com/openmoq/moqx/pull/667))
+- `POST /cache/purge` purges one service, named by `service`; it is required when several services are configured. ([#794](https://github.com/openmoq/moqx/pull/794))
+- Docker interop client image: offers drafts 18 and 16 only. ([#770](https://github.com/openmoq/moqx/pull/770))
 
 ## Fixed
 
@@ -31,11 +56,18 @@ How to add an entry: see [CONTRIBUTING.md](/CONTRIBUTING.md#changelog).
 - The relay requested objects from upstream with no forwarding subscriber. ([#742](https://github.com/openmoq/moqx/pull/742))
 - The relay stopped reconnecting after an upstream dropped mid-handshake. ([#737](https://github.com/openmoq/moqx/pull/737))
 - FETCH served from the cache could return wrong or missing objects. ([#734](https://github.com/openmoq/moqx/pull/734), [#735](https://github.com/openmoq/moqx/pull/735), [#736](https://github.com/openmoq/moqx/pull/736), [#750](https://github.com/openmoq/moqx/pull/750), [#755](https://github.com/openmoq/moqx/pull/755))
-- A crash in multi-threaded mode. ([#733](https://github.com/openmoq/moqx/pull/733))
+- Crashes in multi-threaded mode. ([#733](https://github.com/openmoq/moqx/pull/733), [#793](https://github.com/openmoq/moqx/pull/793))
 - A shutdown error log for relays with an upstream. ([#746](https://github.com/openmoq/moqx/pull/746))
 - A peer's namespace subscription outlived its session. ([#775](https://github.com/openmoq/moqx/pull/775))
 - An upstream connect failure is logged only once. ([#744](https://github.com/openmoq/moqx/pull/744))
 - With `use_local_forwarders`, a joining FETCH pipelined behind its SUBSCRIBE resolved against a stale or missing Largest. ([#783](https://github.com/openmoq/moqx/pull/783))
+- FETCH served from the cache scrambled the payload of an object that arrived in three or more chunks. ([#808](https://github.com/openmoq/moqx/pull/808))
+- Cache eviction could drop a live track's newest group, such as a catalog written once, so late joiners missed it. ([#739](https://github.com/openmoq/moqx/pull/739))
+- picoquic WebTransport clients could not connect to the mvfst listener, which did not advertise `reset_stream_at`. ([#797](https://github.com/openmoq/moqx/pull/797))
+
+## Dependencies
+
+- moxygen [v0.3.6](https://github.com/openmoq/moxygen/releases/tag/v0.3.6)
 
 [0.3.5] - 2026-09-11
 ====================
