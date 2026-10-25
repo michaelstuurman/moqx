@@ -32,6 +32,7 @@
 #include <folly/ThreadLocal.h>
 #include <folly/container/F14Map.h>
 #include <folly/container/F14Set.h>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -342,6 +343,15 @@ private:
   void onEmpty(moxygen::MoQForwarder* forwarder) override;
   void forwardChanged(moxygen::MoQForwarder* forwarder, bool forward) override;
   void newGroupRequested(moxygen::MoQForwarder* forwarder, uint64_t group) override;
+  void fillRequested(
+      moxygen::MoQForwarder* forwarder,
+      std::shared_ptr<moxygen::TrackConsumer> consumer,
+      moxygen::Fetch fetch
+  ) override;
+
+  // Must run on the requesting session's executor, inside its request context.
+  void serveFill(std::shared_ptr<moxygen::TrackConsumer> consumer, moxygen::Fetch fetch);
+  std::function<void(std::shared_ptr<moxygen::TrackConsumer>, moxygen::Fetch)> makeFillHandler();
 
   friend class WeakRelayForwarderCallback;
 
