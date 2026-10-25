@@ -24,6 +24,7 @@
 #include <folly/CancellationToken.h>
 #include <folly/container/F14Set.h>
 #include <folly/coro/Collect.h>
+#include <moxygen/FillFetch.h>
 #include <moxygen/MoQFilters.h>
 #include <moxygen/MoQTrackProperties.h>
 
@@ -120,13 +121,19 @@ bool shouldForwardNamespace(
          (peerHop == moxygen::kMoQClusterAnonHopId || peerHop != localHopID);
 }
 
-// Rejects an AbsoluteRange subscription whose endGroup is already behind the
-// forwarder's largest group (the client should FETCH instead). Returns
-// std::nullopt when the range is acceptable.
-std::optional<moxygen::SubscribeError>
-checkRangeNotInPast(moxygen::MoQForwarder& fwd, const moxygen::SubscribeRequest& subReq) {
-  if (fwd.largest() && subReq.locType == moxygen::LocationType::AbsoluteRange &&
-      subReq.endGroup < fwd.largest()->group) {
+// Below draft 20, rejects a bounded subscription whose end group is already behind
+// the forwarder's largest group (the client should FETCH instead). Draft 20 accepts
+// it. Returns std::nullopt when the range is acceptable.
+std::optional<moxygen::SubscribeError> checkRangeNotInPast(
+    moxygen::MoQForwarder& fwd,
+    const moxygen::SubscribeRequest& subReq,
+    const moxygen::MoQSession& session
+) {
+  if (moxygen::useFillFetch(session.getNegotiatedVersion().value_or(0))) {
+    return std::nullopt;
+  }
+  auto endGroup = subReq.filter.legacyEndGroup();
+  if (fwd.largest() && endGroup && *endGroup < fwd.largest()->group) {
     return moxygen::SubscribeError{
         subReq.requestID,
         moxygen::SubscribeErrorCode::INVALID_RANGE,
@@ -154,7 +161,9 @@ moxygen::SubscribeRequest makeUpstreamSubReq(
   }
   base.priority = kDefaultUpstreamPriority;
   base.groupOrder = moxygen::GroupOrder::Default;
-  base.locType = moxygen::LocationType::LargestObject;
+  base.filter = moxygen::LocationFilter::nextObject();
+  // Downstream fills come from the cache and an upstream FETCH.
+  base.fill.reset();
   base.forward = forward;
   base.requestID = moxygen::RequestID(0);
   return base;
@@ -641,9 +650,11 @@ LocalForwarderRegistry::ParkResult MoqxRelay::installPublisherForwarder(
   auto crossExec =
       std::make_shared<CrossExecForwarderCallback>(relayExec_, std::move(relayAdapter));
   bool removeOnEmpty = kind == InstallKind::FromSubscribe;
-  fwd->setCallback(
-      std::make_shared<LocalForwarderCallback>(&localReg, ftn, std::move(crossExec), removeOnEmpty)
-  );
+  auto callback =
+      std::make_shared<LocalForwarderCallback>(&localReg, ftn, std::move(crossExec), removeOnEmpty);
+  // Subscribers on this thread attach to fwd directly, so their fills come through here.
+  callback->setFillHandler(makeFillHandler());
+  fwd->setCallback(std::move(callback));
 
   if (kind == InstallKind::FromPublish) {
     return localReg.replaceAndPark(ftn, fwd);
@@ -930,9 +941,7 @@ MoqxRelay::PublishSetupResult MoqxRelay::publishWithSession(
           /*forward=*/shouldForward,
           kDefaultPriority,
           pub.groupOrder,
-          LocationType::AbsoluteRange,
-          kLocationMin,
-          kLocationMax.group
+          LocationFilter::range(kLocationMin, {kLocationMax.group, 0})
       }
   };
 }
@@ -1141,11 +1150,20 @@ class PendingForwarderCallback : public moxygen::MoQForwarder::Callback {
 public:
   PendingForwarderCallback(
       openmoq::moqx::LocalForwarderRegistry* localReg,
-      moxygen::FullTrackName ftn
+      moxygen::FullTrackName ftn,
+      openmoq::moqx::LocalForwarderCallback::FillHandler fillHandler
   )
-      : localReg_(localReg), ftn_(std::move(ftn)) {}
+      : localReg_(localReg), ftn_(std::move(ftn)), fillHandler_(std::move(fillHandler)) {}
 
   void forwardChanged(moxygen::MoQForwarder*, bool f) override { lastForward_ = f; }
+  // Served now: this runs on the same executor as the final callback.
+  void fillRequested(
+      moxygen::MoQForwarder*,
+      std::shared_ptr<moxygen::TrackConsumer> consumer,
+      moxygen::Fetch fetch
+  ) override {
+    fillHandler_(std::move(consumer), std::move(fetch));
+  }
   void newGroupRequested(moxygen::MoQForwarder*, uint64_t g) override {
     maxGroup_ = std::max(maxGroup_.value_or(0), g);
   }
@@ -1156,6 +1174,7 @@ public:
 
   openmoq::moqx::LocalForwarderRegistry* localReg_;
   moxygen::FullTrackName ftn_;
+  openmoq::moqx::LocalForwarderCallback::FillHandler fillHandler_;
   std::optional<bool> lastForward_;
   std::optional<uint64_t> maxGroup_;
   bool sawOnEmpty_{false};
@@ -1231,7 +1250,8 @@ LocalToPublisherCallbacks buildLocalToPublisherCallbacks(
     openmoq::moqx::LocalForwarderRegistry* localReg,
     moxygen::FullTrackName ftn,
     ChannelSubscriber channelSub,
-    folly::Executor* subscriberExec
+    folly::Executor* subscriberExec,
+    LocalForwarderCallback::FillHandler fillHandler
 ) {
   auto* publisherExec = channelSub.exec();
   auto channelCb = std::make_shared<ChannelForwarderCallback>(
@@ -1242,6 +1262,7 @@ LocalToPublisherCallbacks buildLocalToPublisherCallbacks(
   auto crossExecCb = std::make_shared<CrossExecForwarderCallback>(publisherExec, channelCb);
   auto finalCallback =
       std::make_shared<LocalForwarderCallback>(localReg, std::move(ftn), std::move(crossExecCb));
+  finalCallback->setFillHandler(std::move(fillHandler));
   return {std::move(channelCb), std::move(finalCallback)};
 }
 
@@ -1344,7 +1365,7 @@ folly::coro::Task<void> MoqxRelay::addSubscriberAndPublishViaLocalForwarder(
   }
 
   // isNew=true: wire localFwd into publisherFwd as a channel subscriber.
-  auto pendingCb = std::make_shared<PendingForwarderCallback>(localReg, ftn);
+  auto pendingCb = std::make_shared<PendingForwarderCallback>(localReg, ftn, makeFillHandler());
   localFwd->setCallback(pendingCb);
   // deepCopyPayload=true (default): each subscriber thread owns its IOBuf chain,
   // avoiding cross-thread contention on the shared atomic refcount.
@@ -1357,7 +1378,8 @@ folly::coro::Task<void> MoqxRelay::addSubscriberAndPublishViaLocalForwarder(
         localReg,
         ftn,
         std::move(publisher->channelSub),
-        subscriberExec
+        subscriberExec,
+        makeFillHandler()
     );
     installChannelSubscriber(
         *cbs.channelCb,
@@ -2088,6 +2110,9 @@ Publisher::SubscribeResult attachSubscriber(
   }
   XLOG(DBG4) << "added subscriber for ftn=" << fwd.fullTrackName();
   fwd.tryProcessNewGroupRequest(subReq.params);
+  if (subReq.fill) {
+    subscriber->requestFill(subReq.requestID, *subReq.fill);
+  }
   return subscriber;
 }
 
@@ -2233,7 +2258,8 @@ folly::coro::Task<MoqxRelay::PublisherAttachment> MoqxRelay::attachNewLocalForwa
             subscriberReg,
             ftn,
             ChannelSubscriber(publisherFwd, publisherExec),
-            subscriberExec
+            subscriberExec,
+            makeFillHandler()
         );
         attach.finalCallback = cbs.finalCallback;
 
@@ -2435,7 +2461,7 @@ folly::coro::Task<Publisher::SubscribeResult> MoqxRelay::subscribeFromSubscriber
 
   if (auto* ready = std::get_if<LocalForwarderRegistry::Ready>(&joined)) {
     auto& readyFwd = *ready->forwarder;
-    if (auto err = checkRangeNotInPast(readyFwd, subReq)) {
+    if (auto err = checkRangeNotInPast(readyFwd, subReq, *session)) {
       co_return folly::makeUnexpected(std::move(*err));
     }
     co_return attachSubscriber(readyFwd, std::move(session), subReq, std::move(consumer));
@@ -2449,7 +2475,7 @@ folly::coro::Task<Publisher::SubscribeResult> MoqxRelay::subscribeFromSubscriber
 
   // Install PendingForwarderCallback first so forwardChanged/newGroupRequested/onEmpty
   // events during setup are captured for replay.
-  auto pendingCb = std::make_shared<PendingForwarderCallback>(localReg, ftn);
+  auto pendingCb = std::make_shared<PendingForwarderCallback>(localReg, ftn, makeFillHandler());
   localFwd->setCallback(pendingCb);
 
   // deepCopyPayload=true (default): each subscriber thread owns its IOBuf chain,
@@ -2506,6 +2532,9 @@ folly::coro::Task<Publisher::SubscribeResult> MoqxRelay::subscribeFromSubscriber
   replayPendingFowarderEvents(localFwd.get(), attach.finalCallback, *pendingCb, forward);
   localFwd->tryProcessNewGroupRequest(subReq.params);
   claim.markReady();
+  if (subReq.fill) {
+    sub->requestFill(subReq.requestID, *subReq.fill);
+  }
   co_return sub;
 }
 
@@ -2588,6 +2617,7 @@ MoqxRelay::subscribeImpl(SubscribeRequest subReq, std::shared_ptr<TrackConsumer>
     // Subscribe upstream with forward set only while we have forwarding
     // subscribers, so an idle relay doesn't pull data it won't deliver.
     const auto clientRequestID = subReq.requestID;
+    const auto fill = subReq.fill;
     subReq = makeUpstreamSubReq(
         std::move(subReq),
         first->forwarder->numForwardingSubscribers() > 0,
@@ -2618,6 +2648,10 @@ MoqxRelay::subscribeImpl(SubscribeRequest subReq, std::shared_ptr<TrackConsumer>
         )) {
       co_return folly::makeUnexpected(std::move(*err));
     }
+    // Only now do the forwarder and the cache know upstream's Largest.
+    if (fill) {
+      subscriber->requestFill(clientRequestID, *fill);
+    }
     co_return subscriber;
 
   } else {
@@ -2628,7 +2662,7 @@ MoqxRelay::subscribeImpl(SubscribeRequest subReq, std::shared_ptr<TrackConsumer>
     // the entry's ref is owned here.
     auto forwarder = sub.forwarder.getIfOwned();
     XCHECK(forwarder) << "subscribeImpl reached with a remote forwarder ref";
-    if (auto err = checkRangeNotInPast(*forwarder, subReq)) {
+    if (auto err = checkRangeNotInPast(*forwarder, subReq, *session)) {
       co_return folly::makeUnexpected(std::move(*err));
     }
     co_return attachSubscriber(*forwarder, std::move(session), subReq, std::move(consumer));
@@ -2669,6 +2703,9 @@ MoqxRelay::resolveJoiningFetchOnSubscriberExec(Fetch& fetch, const MoQSession& s
   if (!joining) {
     return folly::makeSemiFuture();
   }
+  // A draft 20 FETCH carries no Fetch Type, so it always parses as standalone.
+  XCHECK(!useFillFetch(session.getNegotiatedVersion().value_or(0)))
+      << "joining FETCH under a draft 20 session";
   // All of a session's subscriptions are on its thread's forwarders.
   auto* localReg = tlForwarders_.get();
   auto state = localReg ? localReg->lookup(fetch.fullTrackName) : LocalForwarderRegistry::State{};
@@ -2702,6 +2739,9 @@ MoqxRelay::fetchImpl(Fetch fetch, std::shared_ptr<FetchConsumer> consumer) {
   }
 
   auto [standalone, joining] = fetchType(fetch);
+  // A draft 20 FETCH carries no Fetch Type, so it always parses as standalone.
+  XCHECK(!joining || !useFillFetch(session->getNegotiatedVersion().value_or(0)))
+      << "joining FETCH under a draft 20 session";
   // LF mode resolves joining fetches on the subscriber exec.
   if (joining && mode() != Mode::LocalForwarder) {
     auto fetchView = registry_.getFetchView(fetch.fullTrackName);
@@ -2909,6 +2949,48 @@ void MoqxRelay::forwardChangedImpl(const FullTrackName& ftn, bool forward) {
 
 void MoqxRelay::newGroupRequested(MoQForwarder* forwarder, uint64_t group) {
   newGroupRequestedImpl(forwarder->fullTrackName(), group);
+}
+
+// beginFill must run on the session's executor. Posting there keeps the fill stream
+// ahead of a later publishDone, which CrossExecFilter posts to the same executor.
+void MoqxRelay::fillRequested(
+    MoQForwarder* /*forwarder*/,
+    std::shared_ptr<TrackConsumer> consumer,
+    Fetch fetch
+) {
+  if (!relayExec_) {
+    serveFill(std::move(consumer), std::move(fetch));
+    return;
+  }
+  auto session = MoQSession::getRequestSession();
+  if (!session) {
+    XLOG(ERR) << "Fill requested outside a session id=" << fetch.requestID;
+    return;
+  }
+  session->getExecutor()->add([self = shared_from_this(),
+                               ctx = folly::RequestContext::saveContext(),
+                               consumer = std::move(consumer),
+                               fetch = std::move(fetch)]() mutable {
+    folly::RequestContextScopeGuard guard(std::move(ctx));
+    self->serveFill(std::move(consumer), std::move(fetch));
+  });
+}
+
+// Weak: the relay's registry owns the forwarder callback that holds this handler.
+std::function<void(std::shared_ptr<TrackConsumer>, Fetch)> MoqxRelay::makeFillHandler() {
+  return [weak = weak_from_this()](std::shared_ptr<TrackConsumer> consumer, Fetch fetch) {
+    if (auto self = weak.lock()) {
+      self->serveFill(std::move(consumer), std::move(fetch));
+    }
+  };
+}
+
+void MoqxRelay::serveFill(std::shared_ptr<TrackConsumer> consumer, Fetch fetch) {
+  serveFillFromFetch(
+      maybeCrossExec(relayExec_, std::shared_ptr<Publisher>(shared_from_this())),
+      std::move(consumer),
+      std::move(fetch)
+  );
 }
 
 void MoqxRelay::newGroupRequestedImpl(const FullTrackName& ftn, uint64_t group) {
