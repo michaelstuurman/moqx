@@ -120,11 +120,17 @@ bool shouldForwardNamespace(
          (peerHop == moxygen::kMoQClusterAnonHopId || peerHop != localHopID);
 }
 
-// Rejects a bounded subscription whose end group is already behind the
-// forwarder's largest group (the client should FETCH instead). Returns
-// std::nullopt when the range is acceptable.
-std::optional<moxygen::SubscribeError>
-checkRangeNotInPast(moxygen::MoQForwarder& fwd, const moxygen::SubscribeRequest& subReq) {
+// Below draft 20, rejects a bounded subscription whose end group is already behind
+// the forwarder's largest group (the client should FETCH instead). Draft 20 accepts
+// it. Returns std::nullopt when the range is acceptable.
+std::optional<moxygen::SubscribeError> checkRangeNotInPast(
+    moxygen::MoQForwarder& fwd,
+    const moxygen::SubscribeRequest& subReq,
+    const moxygen::MoQSession& session
+) {
+  if (moxygen::useFillFetch(session.getNegotiatedVersion().value_or(0))) {
+    return std::nullopt;
+  }
   auto endGroup = subReq.filter.legacyEndGroup();
   if (fwd.largest() && endGroup && *endGroup < fwd.largest()->group) {
     return moxygen::SubscribeError{
@@ -2433,7 +2439,7 @@ folly::coro::Task<Publisher::SubscribeResult> MoqxRelay::subscribeFromSubscriber
 
   if (auto* ready = std::get_if<LocalForwarderRegistry::Ready>(&joined)) {
     auto& readyFwd = *ready->forwarder;
-    if (auto err = checkRangeNotInPast(readyFwd, subReq)) {
+    if (auto err = checkRangeNotInPast(readyFwd, subReq, *session)) {
       co_return folly::makeUnexpected(std::move(*err));
     }
     co_return attachSubscriber(readyFwd, std::move(session), subReq, std::move(consumer));
@@ -2626,7 +2632,7 @@ MoqxRelay::subscribeImpl(SubscribeRequest subReq, std::shared_ptr<TrackConsumer>
     // the entry's ref is owned here.
     auto forwarder = sub.forwarder.getIfOwned();
     XCHECK(forwarder) << "subscribeImpl reached with a remote forwarder ref";
-    if (auto err = checkRangeNotInPast(*forwarder, subReq)) {
+    if (auto err = checkRangeNotInPast(*forwarder, subReq, *session)) {
       co_return folly::makeUnexpected(std::move(*err));
     }
     co_return attachSubscriber(*forwarder, std::move(session), subReq, std::move(consumer));
