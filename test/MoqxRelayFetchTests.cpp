@@ -258,9 +258,7 @@ TEST_P(MoQRelayTest, JoiningFetchAgainstPublish) {
                   /*forward=*/true,
                   0,
                   GroupOrder::OldestFirst,
-                  LocationType::LargestObject,
-                  std::nullopt,
-                  std::nullopt
+                  LocationFilter::nextObject()
               };
             }()
         });
@@ -400,7 +398,7 @@ TEST_P(MoQRelayTest, JoiningFetchWaitsForItsSubscribeSetup) {
     SubscribeRequest sub;
     sub.fullTrackName = kTestTrackName;
     sub.requestID = RequestID(0);
-    sub.locType = LocationType::LargestObject;
+    sub.filter = LocationFilter::nextObject();
     auto subTask = publisherInterface()->subscribe(std::move(sub), createMockConsumer());
     co_withExecutor(
         static_cast<folly::DrivableExecutor*>(exec_.get()),

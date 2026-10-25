@@ -120,13 +120,13 @@ bool shouldForwardNamespace(
          (peerHop == moxygen::kMoQClusterAnonHopId || peerHop != localHopID);
 }
 
-// Rejects an AbsoluteRange subscription whose endGroup is already behind the
+// Rejects a bounded subscription whose end group is already behind the
 // forwarder's largest group (the client should FETCH instead). Returns
 // std::nullopt when the range is acceptable.
 std::optional<moxygen::SubscribeError>
 checkRangeNotInPast(moxygen::MoQForwarder& fwd, const moxygen::SubscribeRequest& subReq) {
-  if (fwd.largest() && subReq.locType == moxygen::LocationType::AbsoluteRange &&
-      subReq.endGroup < fwd.largest()->group) {
+  auto endGroup = subReq.filter.legacyEndGroup();
+  if (fwd.largest() && endGroup && *endGroup < fwd.largest()->group) {
     return moxygen::SubscribeError{
         subReq.requestID,
         moxygen::SubscribeErrorCode::INVALID_RANGE,
@@ -154,7 +154,7 @@ moxygen::SubscribeRequest makeUpstreamSubReq(
   }
   base.priority = kDefaultUpstreamPriority;
   base.groupOrder = moxygen::GroupOrder::Default;
-  base.locType = moxygen::LocationType::LargestObject;
+  base.filter = moxygen::LocationFilter::nextObject();
   base.forward = forward;
   base.requestID = moxygen::RequestID(0);
   return base;
@@ -930,9 +930,7 @@ MoqxRelay::PublishSetupResult MoqxRelay::publishWithSession(
           /*forward=*/shouldForward,
           kDefaultPriority,
           pub.groupOrder,
-          LocationType::AbsoluteRange,
-          kLocationMin,
-          kLocationMax.group
+          LocationFilter::range(kLocationMin, {kLocationMax.group, 0})
       }
   };
 }

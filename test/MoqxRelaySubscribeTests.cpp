@@ -129,7 +129,7 @@ TEST_P(MoQRelayTest, Subscribe_SecondForwardingSubscriber_SingleRequestUpdate) {
     SubscribeRequest sub;
     sub.fullTrackName = kTestTrackName;
     sub.requestID = RequestID(1);
-    sub.locType = LocationType::LargestObject;
+    sub.filter = LocationFilter::nextObject();
     sub.forward = false;
     withSessionContext(s1, [&]() {
       auto res = folly::coro::blockingWait(
@@ -159,7 +159,7 @@ TEST_P(MoQRelayTest, Subscribe_SecondForwardingSubscriber_SingleRequestUpdate) {
     SubscribeRequest sub;
     sub.fullTrackName = kTestTrackName;
     sub.requestID = RequestID(2);
-    sub.locType = LocationType::LargestObject;
+    sub.filter = LocationFilter::nextObject();
     sub.forward = true;
     withSessionContext(s2, [&]() {
       auto res = folly::coro::blockingWait(
@@ -303,7 +303,7 @@ TEST_P(MoQRelayTest, SubsequentSubscriberWaitsForUpstreamLargestSeeding) {
       SubscribeRequest sub;
       sub.fullTrackName = kTestTrackName;
       sub.requestID = requestID;
-      sub.locType = LocationType::LargestObject;
+      sub.filter = LocationFilter::nextObject();
       auto task = publisherInterface()->subscribe(std::move(sub), std::move(consumer));
       co_withExecutor(
           static_cast<folly::DrivableExecutor*>(exec_.get()),
@@ -396,7 +396,7 @@ TEST_P(MoQRelayTest, SubsequentSubscriberFailsWhenUpstreamSubscribeFails) {
       SubscribeRequest sub;
       sub.fullTrackName = kTestTrackName;
       sub.requestID = requestID;
-      sub.locType = LocationType::LargestObject;
+      sub.filter = LocationFilter::nextObject();
       auto task = publisherInterface()->subscribe(std::move(sub), std::move(consumer));
       // ST/MT signal first-subscriber failure by throwing out of the SubsequentSubscriber
       // task; normalize to an error result so both shapes are comparable.
@@ -500,7 +500,7 @@ TEST_P(MoQRelayTest, UpstreamSubscribeThrowDoesNotStrandGate) {
     SubscribeRequest sub;
     sub.fullTrackName = kTestTrackName;
     sub.requestID = RequestID(0);
-    sub.locType = LocationType::LargestObject;
+    sub.filter = LocationFilter::nextObject();
     auto task = publisherInterface()->subscribe(std::move(sub), createMockConsumer());
     co_withExecutor(
         static_cast<folly::DrivableExecutor*>(exec_.get()),
@@ -521,7 +521,7 @@ TEST_P(MoQRelayTest, UpstreamSubscribeThrowDoesNotStrandGate) {
       SubscribeRequest sub;
       sub.fullTrackName = kTestTrackName;
       sub.requestID = RequestID(2);
-      sub.locType = LocationType::LargestObject;
+      sub.filter = LocationFilter::nextObject();
       auto task = publisherInterface()->subscribe(std::move(sub), secondConsumer);
       co_withExecutor(
           folly::getKeepAliveToken(pubEvb),
@@ -606,7 +606,7 @@ TEST_P(MoQRelayTest, CrossThreadSubsequentSubscriberSeedingRace) {
       SubscribeRequest sub;
       sub.fullTrackName = kTestTrackName;
       sub.requestID = requestID;
-      sub.locType = LocationType::LargestObject;
+      sub.filter = LocationFilter::nextObject();
       auto task = publisherInterface()->subscribe(std::move(sub), createMockConsumer());
       co_withExecutor(
           startExec,
@@ -729,7 +729,7 @@ TEST_P(MoQRelayTest, PublishFanoutDuringParkedSubscribeSetup) {
     SubscribeRequest sub;
     sub.fullTrackName = kTestTrackName;
     sub.requestID = RequestID(0);
-    sub.locType = LocationType::LargestObject;
+    sub.filter = LocationFilter::nextObject();
     auto task = publisherInterface()->subscribe(std::move(sub), subConsumer);
     co_withExecutor(
         static_cast<folly::DrivableExecutor*>(exec_.get()),
