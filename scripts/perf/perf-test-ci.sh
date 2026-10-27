@@ -275,7 +275,7 @@ trap cleanup EXIT
 echo "Starting relay on $RELAY_HOST (quic_stack=$QUIC_STACK, bind=$RELAY_BIND_ADDR, io_threads=$IO_THREADS)..."
 ssh "${SSH_OPTS[@]}" "$RELAY_HOST" "
   ulimit -n 65536 2>/dev/null || true
-  nohup env LD_LIBRARY_PATH=${REMOTE_DIR}/lib \
+  nohup env MALLOC_CONF=thp:always LD_LIBRARY_PATH=${REMOTE_DIR}/lib \
     MOQX_RELAY_ID=perf-ci-relay \
     MOQX_RESOLVED_CONFIG=${REMOTE_DIR}/relay.yaml \
     bash ${REMOTE_DIR}/moqx-run.sh \
