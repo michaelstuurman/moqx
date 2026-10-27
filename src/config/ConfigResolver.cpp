@@ -954,6 +954,8 @@ void applyMvfstOverride(MvfstConfig& base, const ParsedMvfstConfig& overlay) {
   }
   if (auto v = overlay.udp_socket_buffer_bytes.value())
     base.udpSocketBufferBytes = *v;
+  if (auto v = overlay.h3_txn_timeout_ms.value())
+    base.h3TxnTimeoutMs = *v;
 }
 
 MvfstConfig mergeMvfstConfig(

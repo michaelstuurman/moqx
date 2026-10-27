@@ -2205,6 +2205,7 @@ TEST(ResolveConfig, MvfstDefaultsRoundTrip) {
   EXPECT_TRUE(mvfst.bbr2.enableRecoveryInStartup);
   EXPECT_TRUE(mvfst.bbr2.enableRecoveryInProbeStates);
   EXPECT_FLOAT_EQ(mvfst.l4s.ceTarget, 0.0f);
+  EXPECT_EQ(mvfst.h3TxnTimeoutMs, 0u);
 }
 
 // listener_defaults.mvfst propagates to listeners; per-listener overrides win;
@@ -2215,6 +2216,7 @@ TEST(ResolveConfig, MvfstInheritanceAndOverride) {
   ParsedMvfstConfig defaults;
   defaults.max_cwnd_in_mss = std::optional<uint64_t>{100000};
   defaults.num_gro_buffers = std::optional<uint32_t>{4};
+  defaults.h3_txn_timeout_ms = std::optional<uint64_t>{60000};
   ParsedListenerDefaultsConfig ld;
   ld.mvfst = std::optional<ParsedMvfstConfig>{std::move(defaults)};
   cfg.listener_defaults = std::optional<ParsedListenerDefaultsConfig>{std::move(ld)};
@@ -2228,6 +2230,7 @@ TEST(ResolveConfig, MvfstInheritanceAndOverride) {
   const auto& mvfst = result.value().config.listeners[0].mvfst;
   EXPECT_EQ(mvfst.maxCwndInMss, 200000u); // per-listener wins
   EXPECT_EQ(mvfst.numGROBuffers, 4u);     // from defaults
+  EXPECT_EQ(mvfst.h3TxnTimeoutMs, 60000u);
 
   // Validation uses merged values: max_conn_packets_sent_per_loop=0 in defaults
   // triggers error even when the per-listener fragment doesn't set it.
