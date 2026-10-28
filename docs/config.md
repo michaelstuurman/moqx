@@ -82,7 +82,7 @@ long as its QUIC connection, which `quic.idle_timeout_ms` ends once the peer
 goes silent. `mvfst: {h3_txn_timeout_ms: N}` adds an HTTP/3 idle timeout:
 it ends a session whose CONNECT stream stays quiet for N ms. That stream
 carries nothing while a publisher has no subscribers, so N must exceed the
-longest such gap. Default 0, none.
+longest such gap. Default 0, none (in effect a year, the largest value).
 
 ### QUIC Settings
 

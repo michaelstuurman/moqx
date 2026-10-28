@@ -159,6 +159,8 @@ struct MvfstConfig {
   // connection (quic.idleTimeoutMs). proxygen's 60 s ends an idle publisher's
   // session, because nothing is sent on the CONNECT stream while no one subscribes.
   uint64_t h3TxnTimeoutMs{0};
+  // Largest h3TxnTimeoutMs, a year; "none" uses it too.
+  static constexpr uint64_t kMaxH3TxnTimeoutMs = 365ull * 24 * 60 * 60 * 1000;
 
   BBR bbr;
   BBR2 bbr2;

@@ -12,6 +12,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <variant>
 
 namespace openmoq::moqx::config {
@@ -2266,6 +2267,25 @@ TEST(ResolveConfig, MvfstZeroValuesAreErrors) {
     ASSERT_TRUE(result.hasError()) << "expected error for " << tc.field;
     EXPECT_THAT(result.error(), HasSubstr(tc.field));
   }
+}
+
+// h3_txn_timeout_ms above a year is an error; the year itself is accepted.
+TEST(ResolveConfig, MvfstH3TxnTimeoutAboveAYearIsError) {
+  constexpr uint64_t kMax = MvfstConfig::kMaxH3TxnTimeoutMs;
+  for (uint64_t bad : {kMax + 1, std::numeric_limits<uint64_t>::max()}) {
+    auto cfg = makeMinimalInsecureConfig();
+    ParsedMvfstConfig mvfst;
+    mvfst.h3_txn_timeout_ms = std::optional<uint64_t>{bad};
+    setListenerMvfst(cfg, std::move(mvfst));
+    auto result = resolveConfig(cfg);
+    ASSERT_TRUE(result.hasError()) << "h3_txn_timeout_ms=" << bad;
+    EXPECT_THAT(result.error(), HasSubstr("h3_txn_timeout_ms"));
+  }
+  auto cfg = makeMinimalInsecureConfig();
+  ParsedMvfstConfig mvfst;
+  mvfst.h3_txn_timeout_ms = std::optional<uint64_t>{kMax};
+  setListenerMvfst(cfg, std::move(mvfst));
+  EXPECT_FALSE(resolveConfig(cfg).hasError());
 }
 
 // copa.delta_param must be in (0, 1); l4s.ce_target must be 0 or in (0, 1).
